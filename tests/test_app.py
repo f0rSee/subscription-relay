@@ -6,7 +6,11 @@ import httpx
 
 from backend.app.config import Settings, _normalize_database_url
 from backend.app.main import create_app
-from backend.app.services.subscriptions import UPSTREAM_USER_AGENT, parse_subscription
+from backend.app.services.subscriptions import (
+    UPSTREAM_HEADERS,
+    UPSTREAM_USER_AGENT,
+    parse_subscription,
+)
 
 
 def settings_for(tmp_path: Path) -> Settings:
@@ -302,6 +306,14 @@ def test_request_logs_devices_settings_and_deduplication(tmp_path, monkeypatch):
         assert first_request.status_code == 200
         assert fetch_count == 1
         assert UPSTREAM_USER_AGENT == "Happ/5.6.0/ios/2731171157721"
+        assert UPSTREAM_HEADERS == {
+            "User-Agent": "Happ/5.6.0/ios/2731171157721",
+            "Accept": "text/plain, */*",
+            "X-HWID": "4139def9-6877-4771-b313-49e3119ba158",
+            "X-Device-OS": "iOS",
+            "X-Ver-OS": "27.0",
+            "X-Device-Model": "iPhone 17 Pro Max",
+        }
 
         logs = (await client.get("/api/request-logs")).json()
         assert len(logs) == 1

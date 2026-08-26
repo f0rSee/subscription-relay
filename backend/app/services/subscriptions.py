@@ -27,6 +27,14 @@ SUPPORTED_PROTOCOLS = (
     "wireguard",
 )
 UPSTREAM_USER_AGENT = "Happ/5.6.0/ios/2731171157721"
+UPSTREAM_HEADERS = {
+    "User-Agent": UPSTREAM_USER_AGENT,
+    "Accept": "text/plain, */*",
+    "X-HWID": "4139def9-6877-4771-b313-49e3119ba158",
+    "X-Device-OS": "iOS",
+    "X-Ver-OS": "27.0",
+    "X-Device-Model": "iPhone 17 Pro Max",
+}
 
 
 @dataclass(frozen=True)
@@ -124,10 +132,9 @@ async def fetch_subscription(
     url: str,
     settings: Settings,
 ) -> tuple[bytes, httpx.Headers]:
-    headers = {"User-Agent": UPSTREAM_USER_AGENT, "Accept": "text/plain, */*"}
     timeout = httpx.Timeout(settings.timeout_seconds)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        async with client.stream("GET", url, headers=headers) as response:
+        async with client.stream("GET", url, headers=UPSTREAM_HEADERS) as response:
             response.raise_for_status()
             body = bytearray()
             async for chunk in response.aiter_bytes():
