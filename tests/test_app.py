@@ -301,7 +301,7 @@ def test_request_logs_devices_settings_and_deduplication(tmp_path, monkeypatch):
         )
         assert first_request.status_code == 200
         assert fetch_count == 1
-        assert UPSTREAM_USER_AGENT == "subscription-relay/2.0"
+        assert UPSTREAM_USER_AGENT == "Happ/5.6.0/ios/2731171157721"
 
         logs = (await client.get("/api/request-logs")).json()
         assert len(logs) == 1
