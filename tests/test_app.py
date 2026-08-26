@@ -168,7 +168,7 @@ def test_combines_sources_and_persists_profile_order(tmp_path, monkeypatch):
     asyncio.run(with_client(app, scenario))
 
 
-def test_default_token_and_empty_upstream_error(tmp_path, monkeypatch):
+def test_default_profile_and_empty_upstream_error(tmp_path, monkeypatch):
     app = create_app(settings_for(tmp_path))
 
     async def fake_fetch(url, settings):
@@ -179,16 +179,7 @@ def test_default_token_and_empty_upstream_error(tmp_path, monkeypatch):
     )
 
     async def scenario(client: httpx.AsyncClient):
-        rejected = await client.get("/subscription?token=wrong")
-        assert rejected.status_code == 401
-
-        removed_header_auth = await client.get(
-            "/subscription",
-            headers={"X-Relay-Token": "test-relay-token-at-least-16"},
-        )
-        assert removed_header_auth.status_code == 401
-
-        response = await client.get("/subscription?token=test-relay-token-at-least-16")
+        response = await client.get("/s/test-relay-token-at-least-16")
         assert response.status_code == 502
         assert response.json()["detail"] == (
             "No healthy nodes are available for this profile"
@@ -209,8 +200,16 @@ def test_removed_legacy_route_and_missing_dashboard_assets(tmp_path):
     app = create_app(settings_for(tmp_path))
     route_paths = {route.path for route in app.routes if hasattr(route, "path")}
     assert "/api/sync-runs" not in route_paths
+    assert "/subscription" not in route_paths
 
     async def scenario(client: httpx.AsyncClient):
+        for path in (
+            "/subscription?token=test-relay-token-at-least-16",
+            "/subscription/?token=test-relay-token-at-least-16",
+        ):
+            removed_subscription = await client.get(path)
+            assert removed_subscription.status_code == 404
+
         missing_assets = await client.get("/admin/settings")
         assert missing_assets.status_code == 503
         assert missing_assets.json() == {"detail": "Dashboard assets are not built"}
@@ -243,7 +242,7 @@ def test_request_logs_devices_settings_and_deduplication(tmp_path, monkeypatch):
         first_source_id = subscriptions[0]["id"]
 
         first_request = await client.get(
-            "/subscription?token=test-relay-token-at-least-16",
+            "/s/test-relay-token-at-least-16",
             headers={
                 "User-Agent": "v2rayNG/1.10.11",
             },
@@ -255,7 +254,7 @@ def test_request_logs_devices_settings_and_deduplication(tmp_path, monkeypatch):
         logs = (await client.get("/api/request-logs")).json()
         assert len(logs) == 1
         assert logs[0]["client_name"] == "v2rayNG"
-        assert logs[0]["request_type"] == "default"
+        assert logs[0]["request_type"] == "profile"
         assert logs[0]["status_code"] == 200
         assert logs[0]["node_count"] == 2
         assert "test-relay-token" not in str(logs[0])

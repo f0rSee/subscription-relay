@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import secrets
-from typing import Annotated
-
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import select, text
 
@@ -33,32 +30,6 @@ async def healthz(runtime: RuntimeDep) -> Response:
             ),
         },
         headers={"Cache-Control": "no-store"},
-    )
-
-
-@router.get("/subscription", include_in_schema=False)
-async def default_subscription(
-    request: Request,
-    runtime: RuntimeDep,
-    session: SessionDep,
-    token: Annotated[str | None, Query()] = None,
-) -> Response:
-    if not secrets.compare_digest(token or "", runtime.settings.relay_token):
-        return JSONResponse(
-            status_code=401,
-            content={"detail": "Invalid relay token"},
-            headers={"Cache-Control": "no-store"},
-        )
-    profile = await session.scalar(
-        select(Profile).where(Profile.token == runtime.settings.relay_token)
-    )
-    if profile is None:
-        return JSONResponse(status_code=503, content={"detail": "No profile"})
-    return await render_profile(
-        request,
-        runtime,
-        profile,
-        request_type="default",
     )
 
 

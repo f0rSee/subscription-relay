@@ -40,10 +40,8 @@ flowchart LR
     A[VPN-провайдеры] -->|HTTPS| B[Синхронизация источников]
     B --> C[(SQLite / PostgreSQL)]
     C --> D[Профили и порядок узлов]
-    D --> E[/subscription?token=...]
-    D --> F[/s/PROFILE_TOKEN]
+    D --> E[/s/PROFILE_TOKEN]
     E --> G[VPN-клиент]
-    F --> G
     H[React-дашборд] -->|Admin API| C
 ```
 
@@ -104,7 +102,7 @@ fastapi run --host 127.0.0.1 --port 8000
 Основной профиль использует `RELAY_TOKEN`:
 
 ```text
-https://relay.example/subscription?token=RELAY_TOKEN
+https://relay.example/s/RELAY_TOKEN
 ```
 
 Каждый дополнительный профиль получает случайный токен и отдельный URL:
@@ -119,7 +117,7 @@ https://relay.example/s/PROFILE_TOKEN
 curl --fail --silent --show-error \
   --output /dev/null \
   --write-out 'HTTP %{http_code}, %{size_download} bytes\n' \
-  'http://127.0.0.1:8000/subscription?token=RELAY_TOKEN'
+  'http://127.0.0.1:8000/s/RELAY_TOKEN'
 ```
 
 > [!NOTE]
@@ -170,7 +168,7 @@ frontend/src/         # React 19, TypeScript, ReUI и Vite
 tests/                # parser, auth, CSRF, API и сборка профилей
 ```
 
-Все admin-маршруты объединены под `/api` и защищены общей зависимостью авторизации. Публичные `/healthz`, `/subscription` и `/s/{token}` изолированы в отдельном роутере. FastAPI также раздаёт production-сборку SPA под `/admin/`.
+Все admin-маршруты объединены под `/api` и защищены общей зависимостью авторизации. Публичные `/healthz` и `/s/{token}` изолированы в отдельном роутере. FastAPI также раздаёт production-сборку SPA под `/admin/`.
 
 ## Разработка
 
@@ -188,7 +186,7 @@ cd frontend
 bun run dev
 ```
 
-Откройте <http://127.0.0.1:5173/admin/>. Vite проксирует `/api`, `/healthz`, `/subscription` и `/s` на backend.
+Откройте <http://127.0.0.1:5173/admin/>. Vite проксирует `/api`, `/healthz` и `/s` на backend.
 
 Проверки перед коммитом:
 
