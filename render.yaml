@@ -9,3 +9,15 @@ services:
         sync: false
       - key: RELAY_TOKEN
         sync: false
+      - key: ADMIN_USERNAME
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: SECURE_COOKIES
+        value: true
+      - key: APP_ENCRYPTION_KEY
+        generateValue: true
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
