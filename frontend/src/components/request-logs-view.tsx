@@ -71,7 +71,7 @@ export function RequestLogsView({
           <div className="min-w-40">
             <p className="font-medium text-foreground">{row.original.profile_name}</p>
             <p className="text-xs text-muted-foreground">
-              {row.original.request_type === "legacy" ? "Основной URL" : "URL профиля"}
+              {row.original.request_type === "default" ? "Основной URL" : "URL профиля"}
             </p>
           </div>
         ),

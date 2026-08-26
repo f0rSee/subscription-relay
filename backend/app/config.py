@@ -18,9 +18,7 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw_value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _env_float(
-    name: str, default: float, *, minimum: float, maximum: float
-) -> float:
+def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> float:
     raw_value = os.getenv(name)
     if raw_value is None:
         return default
@@ -80,6 +78,7 @@ class Settings:
     timeout_seconds: float
     max_response_bytes: int
     refresh_seconds: int
+    allow_insecure_http: bool
     frontend_dist: Path
 
     @property
@@ -87,7 +86,7 @@ class Settings:
         return not self.database_url.startswith("sqlite")
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         upstream_url = os.getenv("UPSTREAM_URL", "").strip() or None
         if upstream_url:
             parsed_url = urlsplit(upstream_url)
@@ -146,9 +145,8 @@ class Settings:
                 minimum=30,
                 maximum=86400,
             ),
-            frontend_dist=Path(
-                os.getenv("FRONTEND_DIST", "frontend/dist")
-            ).resolve(),
+            allow_insecure_http=_env_bool("ALLOW_INSECURE_HTTP", False),
+            frontend_dist=Path(os.getenv("FRONTEND_DIST", "frontend/dist")).resolve(),
         )
 
 

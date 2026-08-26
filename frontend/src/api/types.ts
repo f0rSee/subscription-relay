@@ -51,8 +51,6 @@ export interface ProfileNode {
   host: string | null
   subscription_id: string
   subscription_name: string
-  enabled: boolean
-  pinned: boolean
   duplicate: boolean
 }
 
@@ -60,7 +58,7 @@ export interface RequestLog {
   id: string
   profile_id: string | null
   profile_name: string
-  request_type: "legacy" | "profile" | string
+  request_type: "default" | "profile" | string
   device_id: string | null
   client_name: string
   user_agent: string

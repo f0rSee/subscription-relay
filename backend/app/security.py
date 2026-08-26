@@ -4,13 +4,13 @@ import base64
 import hashlib
 import secrets
 from dataclasses import dataclass
+from typing import Annotated
 
 from cryptography.fernet import Fernet, InvalidToken
-from fastapi import HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, status
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from .config import Settings
-
 
 SESSION_COOKIE = "relay_admin_session"
 SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
@@ -62,9 +62,7 @@ class SessionManager:
         if not value:
             return None
         try:
-            payload = self.serializer.loads(
-                value, max_age=SESSION_MAX_AGE_SECONDS
-            )
+            payload = self.serializer.loads(value, max_age=SESSION_MAX_AGE_SECONDS)
         except (BadSignature, SignatureExpired):
             return None
         username = payload.get("username")
@@ -75,7 +73,7 @@ class SessionManager:
 
 
 def require_admin(request: Request) -> AdminSession:
-    manager: SessionManager = request.app.state.sessions
+    manager: SessionManager = request.app.state.runtime.sessions
     session = manager.read_cookie(request.cookies.get(SESSION_COOKIE))
     if session is None:
         raise HTTPException(
@@ -90,3 +88,6 @@ def require_admin(request: Request) -> AdminSession:
                 detail="Invalid CSRF token",
             )
     return session
+
+
+AdminSessionDep = Annotated[AdminSession, Depends(require_admin)]

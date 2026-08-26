@@ -4,17 +4,16 @@ import base64
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import unquote, urlsplit
 
 import httpx
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .config import Settings
-from .models import Node, Subscription, SyncRun
-from .security import SecretBox
-
+from ..config import Settings
+from ..models import Node, Subscription
+from ..security import SecretBox
 
 SUPPORTED_PROTOCOLS = (
     "vless",
@@ -27,10 +26,6 @@ SUPPORTED_PROTOCOLS = (
     "tuic",
     "wireguard",
 )
-
-# Subscription providers often change their response format based on User-Agent.
-# A stable service identity keeps synchronization in the URI-list format that the
-# parser needs, regardless of which VPN client requested the relay profile.
 UPSTREAM_USER_AGENT = "subscription-relay/2.0"
 
 
@@ -119,7 +114,8 @@ def encode_subscription(uris: list[str]) -> bytes:
 
 
 async def fetch_subscription(
-    url: str, _user_agent: str, settings: Settings
+    url: str,
+    settings: Settings,
 ) -> tuple[bytes, httpx.Headers]:
     headers = {"User-Agent": UPSTREAM_USER_AGENT, "Accept": "text/plain, */*"}
     timeout = httpx.Timeout(settings.timeout_seconds)
@@ -139,22 +135,18 @@ async def sync_subscription(
     subscription: Subscription,
     settings: Settings,
     secret_box: SecretBox,
-    user_agent: str,
 ) -> int:
-    run = SyncRun(subscription_id=subscription.id, status="running")
-    session.add(run)
-    await session.flush()
-
+    subscription_id = subscription.id
     try:
         url = secret_box.decrypt(subscription.url_ciphertext)
-        body, _ = await fetch_subscription(url, user_agent, settings)
+        body, _ = await fetch_subscription(url, settings)
         parsed_nodes = parse_subscription(body)
         if not parsed_nodes:
             raise ValueError("Upstream response does not contain supported nodes")
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         existing_result = await session.execute(
-            select(Node).where(Node.subscription_id == subscription.id)
+            select(Node).where(Node.subscription_id == subscription_id)
         )
         existing = {node.id: node for node in existing_result.scalars()}
         active_ids: set[str] = set()
@@ -169,14 +161,14 @@ async def sync_subscription(
                 else f"{parsed.fingerprint}:{occurrence}"
             )
             node_id = hashlib.sha256(
-                f"{subscription.id}:{node_identity}".encode("utf-8")
+                f"{subscription_id}:{node_identity}".encode()
             ).hexdigest()
             active_ids.add(node_id)
             node = existing.get(node_id)
             if node is None:
                 node = Node(
                     id=node_id,
-                    subscription_id=subscription.id,
+                    subscription_id=subscription_id,
                     fingerprint=parsed.fingerprint,
                     name=parsed.name,
                     protocol=parsed.protocol,
@@ -202,17 +194,13 @@ async def sync_subscription(
         subscription.node_count = len(parsed_nodes)
         subscription.last_error = None
         subscription.last_sync_at = now
-        run.status = "success"
-        run.node_count = len(parsed_nodes)
-        run.finished_at = now
         await session.commit()
         return len(parsed_nodes)
     except Exception as exc:
-        now = datetime.now(timezone.utc)
-        subscription.status = "error"
-        subscription.last_error = str(exc)[:1000]
-        run.status = "error"
-        run.error = str(exc)[:1000]
-        run.finished_at = now
-        await session.commit()
+        await session.rollback()
+        current = await session.get(Subscription, subscription_id)
+        if current is not None:
+            current.status = "error"
+            current.last_error = str(exc)[:1000]
+            await session.commit()
         raise

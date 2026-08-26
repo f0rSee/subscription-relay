@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def new_id() -> str:
@@ -40,10 +40,10 @@ class Subscription(Base):
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
 
-    nodes: Mapped[list["Node"]] = relationship(
+    nodes: Mapped[list[Node]] = relationship(
         back_populates="subscription", cascade="all, delete-orphan"
     )
-    profile_links: Mapped[list["ProfileSubscription"]] = relationship(
+    profile_links: Mapped[list[ProfileSubscription]] = relationship(
         back_populates="subscription", cascade="all, delete-orphan"
     )
 
@@ -67,7 +67,7 @@ class Node(Base):
     )
 
     subscription: Mapped[Subscription] = relationship(back_populates="nodes")
-    preferences: Mapped[list["ProfileNodePreference"]] = relationship(
+    preferences: Mapped[list[ProfileNodePreference]] = relationship(
         back_populates="node", cascade="all, delete-orphan"
     )
 
@@ -86,10 +86,10 @@ class Profile(Base):
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
 
-    subscription_links: Mapped[list["ProfileSubscription"]] = relationship(
+    subscription_links: Mapped[list[ProfileSubscription]] = relationship(
         back_populates="profile", cascade="all, delete-orphan"
     )
-    node_preferences: Mapped[list["ProfileNodePreference"]] = relationship(
+    node_preferences: Mapped[list[ProfileNodePreference]] = relationship(
         back_populates="profile", cascade="all, delete-orphan"
     )
 
@@ -106,9 +106,7 @@ class ProfileSubscription(Base):
     position: Mapped[int] = mapped_column(Integer, default=0)
 
     profile: Mapped[Profile] = relationship(back_populates="subscription_links")
-    subscription: Mapped[Subscription] = relationship(
-        back_populates="profile_links"
-    )
+    subscription: Mapped[Subscription] = relationship(back_populates="profile_links")
 
 
 class ProfileNodePreference(Base):
@@ -126,24 +124,6 @@ class ProfileNodePreference(Base):
 
     profile: Mapped[Profile] = relationship(back_populates="node_preferences")
     node: Mapped[Node] = relationship(back_populates="preferences")
-
-
-class SyncRun(Base):
-    __tablename__ = "sync_runs"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    subscription_id: Mapped[str] = mapped_column(
-        ForeignKey("subscriptions.id", ondelete="CASCADE"), index=True
-    )
-    status: Mapped[str] = mapped_column(String(32))
-    node_count: Mapped[int] = mapped_column(Integer, default=0)
-    error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    started_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow
-    )
-    finished_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
 
 
 class RelaySettings(Base):

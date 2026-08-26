@@ -3,11 +3,10 @@ import base64
 from pathlib import Path
 
 import httpx
-import pytest
 
 from backend.app.config import Settings, _normalize_database_url
 from backend.app.main import create_app
-from backend.app.subscription_service import UPSTREAM_USER_AGENT, parse_subscription
+from backend.app.services.subscriptions import UPSTREAM_USER_AGENT, parse_subscription
 
 
 def settings_for(tmp_path: Path) -> Settings:
@@ -23,6 +22,7 @@ def settings_for(tmp_path: Path) -> Settings:
         timeout_seconds=5,
         max_response_bytes=1024 * 1024,
         refresh_seconds=900,
+        allow_insecure_http=False,
         frontend_dist=tmp_path / "missing-dist",
     )
 
@@ -86,6 +86,14 @@ def test_health_authentication_and_csrf(tmp_path):
         assert dashboard.status_code == 200
         assert dashboard.json()["subscriptions"] == 1
 
+        default_profile = (await client.get("/api/profiles")).json()[0]
+        rotate_default = await client.patch(
+            f"/api/profiles/{default_profile['id']}",
+            headers={"X-CSRF-Token": csrf},
+            json={"rotate_token": True},
+        )
+        assert rotate_default.status_code == 409
+
         missing_csrf = await client.post(
             "/api/subscriptions",
             json={"name": "Other", "url": "https://other.example/sub"},
@@ -106,17 +114,15 @@ def test_health_authentication_and_csrf(tmp_path):
 def test_combines_sources_and_persists_profile_order(tmp_path, monkeypatch):
     app = create_app(settings_for(tmp_path))
     upstream = base64.b64encode(
-        b"vless://one@one.example:443#One\n"
-        b"trojan://two@two.example:443#Two\n"
+        b"vless://one@one.example:443#One\ntrojan://two@two.example:443#Two\n"
     )
 
-    async def fake_fetch(url, user_agent, settings):
+    async def fake_fetch(url, settings):
         assert url == "https://provider.example/sub?id=secret"
-        assert user_agent
         return upstream, httpx.Headers({"content-type": "text/plain"})
 
     monkeypatch.setattr(
-        "backend.app.subscription_service.fetch_subscription", fake_fetch
+        "backend.app.services.subscriptions.fetch_subscription", fake_fetch
     )
 
     async def scenario(client: httpx.AsyncClient):
@@ -162,25 +168,31 @@ def test_combines_sources_and_persists_profile_order(tmp_path, monkeypatch):
     asyncio.run(with_client(app, scenario))
 
 
-def test_legacy_token_and_empty_upstream_error(tmp_path, monkeypatch):
+def test_default_token_and_empty_upstream_error(tmp_path, monkeypatch):
     app = create_app(settings_for(tmp_path))
 
-    async def fake_fetch(url, user_agent, settings):
+    async def fake_fetch(url, settings):
         return b"device is not supported", httpx.Headers()
 
     monkeypatch.setattr(
-        "backend.app.subscription_service.fetch_subscription", fake_fetch
+        "backend.app.services.subscriptions.fetch_subscription", fake_fetch
     )
 
     async def scenario(client: httpx.AsyncClient):
         rejected = await client.get("/subscription?token=wrong")
         assert rejected.status_code == 401
 
-        response = await client.get(
-            "/subscription", headers={"X-Relay-Token": "test-relay-token-at-least-16"}
+        removed_header_auth = await client.get(
+            "/subscription",
+            headers={"X-Relay-Token": "test-relay-token-at-least-16"},
         )
+        assert removed_header_auth.status_code == 401
+
+        response = await client.get("/subscription?token=test-relay-token-at-least-16")
         assert response.status_code == 502
-        assert response.json()["detail"] == "No healthy nodes are available for this profile"
+        assert response.json()["detail"] == (
+            "No healthy nodes are available for this profile"
+        )
 
         subscriptions = (await login_and_list(client))[0]
         assert subscriptions["status"] == "error"
@@ -193,20 +205,36 @@ def test_legacy_token_and_empty_upstream_error(tmp_path, monkeypatch):
     asyncio.run(with_client(app, scenario))
 
 
+def test_removed_legacy_route_and_missing_dashboard_assets(tmp_path):
+    app = create_app(settings_for(tmp_path))
+    route_paths = {route.path for route in app.routes if hasattr(route, "path")}
+    assert "/api/sync-runs" not in route_paths
+
+    async def scenario(client: httpx.AsyncClient):
+        missing_assets = await client.get("/admin/settings")
+        assert missing_assets.status_code == 503
+        assert missing_assets.json() == {"detail": "Dashboard assets are not built"}
+
+        unknown_api = await client.get("/api/unknown")
+        assert unknown_api.status_code == 404
+
+    asyncio.run(with_client(app, scenario))
+
+
 def test_request_logs_devices_settings_and_deduplication(tmp_path, monkeypatch):
     app = create_app(settings_for(tmp_path))
     upstream = base64.b64encode(
-        b"vless://same@same.example:443#Same\n"
-        b"vless://same@same.example:443#Same copy\n"
+        b"vless://same@same.example:443#Same\nvless://same@same.example:443#Same copy\n"
     )
-    seen_user_agents = []
+    fetch_count = 0
 
-    async def fake_fetch(url, user_agent, settings):
-        seen_user_agents.append(user_agent)
+    async def fake_fetch(url, settings):
+        nonlocal fetch_count
+        fetch_count += 1
         return upstream, httpx.Headers({"content-type": "text/plain"})
 
     monkeypatch.setattr(
-        "backend.app.subscription_service.fetch_subscription", fake_fetch
+        "backend.app.services.subscriptions.fetch_subscription", fake_fetch
     )
 
     async def scenario(client: httpx.AsyncClient):
@@ -215,18 +243,19 @@ def test_request_logs_devices_settings_and_deduplication(tmp_path, monkeypatch):
         first_source_id = subscriptions[0]["id"]
 
         first_request = await client.get(
-            "/subscription",
+            "/subscription?token=test-relay-token-at-least-16",
             headers={
-                "X-Relay-Token": "test-relay-token-at-least-16",
                 "User-Agent": "v2rayNG/1.10.11",
             },
         )
         assert first_request.status_code == 200
-        assert seen_user_agents == [UPSTREAM_USER_AGENT]
+        assert fetch_count == 1
+        assert UPSTREAM_USER_AGENT == "subscription-relay/2.0"
 
         logs = (await client.get("/api/request-logs")).json()
         assert len(logs) == 1
         assert logs[0]["client_name"] == "v2rayNG"
+        assert logs[0]["request_type"] == "default"
         assert logs[0]["status_code"] == 200
         assert logs[0]["node_count"] == 2
         assert "test-relay-token" not in str(logs[0])
