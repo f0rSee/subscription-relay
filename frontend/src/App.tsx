@@ -9,23 +9,27 @@ import type {
   Subscription,
   SubscriptionInput,
 } from "@/api/types"
+import {
+  DashboardSidebar,
+  type DashboardView,
+} from "@/components/dashboard-sidebar"
 import { LoginView } from "@/components/login-view"
 import { NodeOrderView } from "@/components/node-order-view"
 import { ProfilesView } from "@/components/profiles-view"
 import { Alert, AlertDescription, AlertTitle } from "@/components/reui/alert"
-import { Badge } from "@/components/reui/badge"
 import { Frame, FramePanel } from "@/components/reui/frame"
 import { SubscriptionsView } from "@/components/subscriptions-view"
-import { Button } from "@/components/ui/button"
+import {
+  SidebarInset,
+  SidebarProvider,
+  SidebarTrigger,
+} from "@/components/ui/sidebar"
 import { Skeleton } from "@/components/ui/skeleton"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Toaster } from "@/components/ui/sonner"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import {
   DatabaseIcon,
-  ExternalLinkIcon,
   Layers3Icon,
-  LogOutIcon,
   RadioTowerIcon,
   ServerIcon,
   TriangleAlertIcon,
@@ -40,11 +44,27 @@ const summaryItems = [
   { label: "Профили", key: "profiles", icon: UsersIcon },
 ] as const
 
+const viewCopy: Record<DashboardView, { title: string; description: string }> = {
+  subscriptions: {
+    title: "Источники",
+    description: "Добавляйте и синхронизируйте подписки без изменения окружения.",
+  },
+  profiles: {
+    title: "Профили",
+    description: "Собирайте отдельные ссылки для устройств и сценариев подключения.",
+  },
+  order: {
+    title: "Порядок серверов",
+    description: "Управляйте приоритетом серверов для каждого профиля.",
+  },
+}
+
 function errorMessage(reason: unknown) {
   return reason instanceof Error ? reason.message : "Неизвестная ошибка"
 }
 
 export default function App() {
+  const [activeView, setActiveView] = useState<DashboardView>("subscriptions")
   const [session, setSession] = useState<AuthSession | null>(null)
   const [summary, setSummary] = useState<DashboardSummary | null>(null)
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([])
@@ -203,81 +223,64 @@ export default function App() {
 
   return (
     <TooltipProvider>
-      <div className="min-h-svh">
-        <header className="border-b bg-background/90 backdrop-blur">
-          <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6">
-            <div className="flex items-center gap-3">
-              <div className="flex size-9 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-                <RadioTowerIcon className="size-4" aria-hidden="true" />
-              </div>
-              <div>
-                <h1 className="font-semibold tracking-tight">Subscription Relay</h1>
-                <p className="text-xs text-muted-foreground">{session.username}</p>
+      <SidebarProvider>
+        <DashboardSidebar
+          activeView={activeView}
+          subscriptionsCount={subscriptions.length}
+          profilesCount={profiles.length}
+          nodesCount={summary?.nodes ?? 0}
+          username={session.username}
+          onViewChange={setActiveView}
+          onLogout={logout}
+        />
+        <SidebarInset className="min-w-0 overflow-x-hidden">
+          <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 px-4 py-6 sm:px-6 sm:py-8">
+            <div className="flex items-start gap-3">
+              <SidebarTrigger
+                type="button"
+                className="mt-0.5 shrink-0"
+                aria-label="Открыть или свернуть боковую панель"
+              />
+              <div className="min-w-0">
+                <h1 className="text-2xl font-semibold tracking-tight">
+                  {viewCopy[activeView].title}
+                </h1>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {viewCopy[activeView].description}
+                </p>
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={!profiles[0]}
-                render={
-                  profiles[0] ? (
-                    <a href={profiles[0].url} target="_blank" rel="noopener noreferrer" />
-                  ) : undefined
-                }
-              >
-                Проверить relay
-                <ExternalLinkIcon aria-hidden="true" />
-              </Button>
-              <Button type="button" size="icon-sm" variant="ghost" aria-label="Выйти" onClick={() => void logout()}>
-                <LogOutIcon aria-hidden="true" />
-              </Button>
-            </div>
-          </div>
-        </header>
 
-        <main className="mx-auto max-w-7xl space-y-6 px-4 py-6 sm:px-6 sm:py-8">
-          <div>
-            <h2 className="text-2xl font-semibold tracking-tight">Управление подписками</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Источники, профили и порядок серверов применяются без изменения env.
-            </p>
-          </div>
+            {summary?.persistent_storage === false && (
+              <Alert variant="warning">
+                <DatabaseIcon aria-hidden="true" />
+                <AlertTitle>Используется временная база</AlertTitle>
+                <AlertDescription>
+                  Подключите DATABASE_URL от Neon, иначе изменения могут исчезнуть после пересоздания инстанса.
+                </AlertDescription>
+              </Alert>
+            )}
 
-          {summary?.persistent_storage === false && (
-            <Alert variant="warning">
-              <DatabaseIcon aria-hidden="true" />
-              <AlertTitle>Используется временная база</AlertTitle>
-              <AlertDescription>
-                Подключите DATABASE_URL от Neon, иначе изменения могут исчезнуть после пересоздания инстанса.
-              </AlertDescription>
-            </Alert>
-          )}
-
-          <Frame spacing="xs">
-            <FramePanel className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              {summaryItems.map(({ label, key, icon: Icon }) => (
-                <div key={label} className="flex items-center gap-3 lg:border-r lg:last:border-r-0">
-                  <Icon className="size-4 text-muted-foreground" aria-hidden="true" />
-                  <div>
-                    <p className="text-xs text-muted-foreground">{label}</p>
-                    <p className="text-xl font-semibold tabular-nums">{summary?.[key] ?? 0}</p>
+            <Frame spacing="xs">
+              <FramePanel className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                {summaryItems.map(({ label, key, icon: Icon }) => (
+                  <div
+                    key={label}
+                    className="flex items-center gap-3 lg:border-r lg:last:border-r-0"
+                  >
+                    <Icon className="size-4 text-muted-foreground" aria-hidden="true" />
+                    <div>
+                      <p className="text-xs text-muted-foreground">{label}</p>
+                      <p className="text-xl font-semibold tabular-nums">
+                        {summary?.[key] ?? 0}
+                      </p>
+                    </div>
                   </div>
-                </div>
-              ))}
-            </FramePanel>
-          </Frame>
+                ))}
+              </FramePanel>
+            </Frame>
 
-          <Tabs defaultValue="subscriptions">
-            <TabsList variant="line" className="mb-2">
-              <TabsTrigger value="subscriptions">Источники</TabsTrigger>
-              <TabsTrigger value="profiles">
-                Профили
-                <Badge variant="outline" size="sm">{profiles.length}</Badge>
-              </TabsTrigger>
-              <TabsTrigger value="order">Порядок серверов</TabsTrigger>
-            </TabsList>
-            <TabsContent value="subscriptions">
+            {activeView === "subscriptions" && (
               <SubscriptionsView
                 subscriptions={subscriptions}
                 loading={loadingDashboard}
@@ -288,8 +291,8 @@ export default function App() {
                 onSync={syncSubscription}
                 onDelete={deleteSubscription}
               />
-            </TabsContent>
-            <TabsContent value="profiles">
+            )}
+            {activeView === "profiles" && (
               <ProfilesView
                 profiles={profiles}
                 subscriptions={subscriptions}
@@ -297,8 +300,8 @@ export default function App() {
                 onToggle={toggleProfile}
                 onDelete={deleteProfile}
               />
-            </TabsContent>
-            <TabsContent value="order">
+            )}
+            {activeView === "order" && (
               <NodeOrderView
                 key={`${selectedProfileId}:${nodes.map((node) => node.id).join(":")}`}
                 profiles={profiles}
@@ -309,10 +312,10 @@ export default function App() {
                 error={nodesError}
                 onSave={saveNodeOrder}
               />
-            </TabsContent>
-          </Tabs>
-        </main>
-      </div>
+            )}
+          </div>
+        </SidebarInset>
+      </SidebarProvider>
       <Toaster position="bottom-right" />
     </TooltipProvider>
   )
