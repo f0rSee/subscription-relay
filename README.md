@@ -40,7 +40,7 @@ flowchart LR
     A[VPN-провайдеры] -->|HTTPS| B[Синхронизация источников]
     B --> C[(SQLite / PostgreSQL)]
     C --> D[Профили и порядок узлов]
-    D --> E[/s/PROFILE_TOKEN]
+    D --> E["/s/PROFILE_TOKEN"]
     E --> G[VPN-клиент]
     H[React-дашборд] -->|Admin API| C
 ```
