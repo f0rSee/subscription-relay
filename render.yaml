@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: subscription-relay
+    runtime: docker
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: UPSTREAM_URL
+        sync: false
+      - key: RELAY_TOKEN
+        sync: false
