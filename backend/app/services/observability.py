@@ -8,7 +8,6 @@ from fastapi import Request
 
 from ..models import ClientDevice, Profile, RequestLog
 from ..runtime import AppRuntime
-from .settings import get_relay_settings
 
 logger = logging.getLogger(__name__)
 
@@ -29,16 +28,20 @@ async def record_subscription_request(
     status_code: int,
     node_count: int = 0,
     error: str | None = None,
+    request_logging_enabled: bool,
+    device_tracking_enabled: bool,
 ) -> None:
+    if not request_logging_enabled and not device_tracking_enabled:
+        return
+
     client_name, user_agent, ip_address = _client_identity(request)
     now = datetime.now(UTC)
 
     try:
         async with runtime.database.sessions() as session:
-            settings = await get_relay_settings(session)
             device_id: str | None = None
 
-            if settings.device_tracking_enabled:
+            if device_tracking_enabled:
                 device_id = hashlib.sha256(
                     (
                         f"{runtime.settings.session_secret}\0{ip_address}\0{user_agent}"
@@ -67,7 +70,7 @@ async def record_subscription_request(
                     device.last_status_code = status_code
                     device.last_seen_at = now
 
-            if settings.request_logging_enabled:
+            if request_logging_enabled:
                 session.add(
                     RequestLog(
                         profile_id=profile.id,

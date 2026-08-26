@@ -77,6 +77,8 @@ class Settings:
     secure_cookies: bool
     timeout_seconds: float
     max_response_bytes: int
+    # Retained so existing deployments can roll forward without config breakage.
+    # Public profiles now refresh all sources before each response.
     refresh_seconds: int
     allow_insecure_http: bool
     frontend_dist: Path

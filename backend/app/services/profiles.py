@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+import asyncio
+from datetime import UTC, datetime
 from typing import TypeAlias
 
-import httpx
-from fastapi import Request
+from fastapi import BackgroundTasks, Request
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,12 +14,17 @@ from ..models import (
     Profile,
     ProfileNodePreference,
     ProfileSubscription,
+    RelaySettings,
     Subscription,
 )
 from ..runtime import AppRuntime
 from .observability import record_subscription_request
-from .settings import get_relay_settings
-from .subscriptions import encode_subscription, sync_subscription
+from .subscriptions import (
+    PreparedSubscriptionSync,
+    encode_subscription,
+    persist_subscription_syncs,
+    prepare_subscription_sync,
+)
 
 ProfileNodeRow: TypeAlias = tuple[
     Node,
@@ -28,12 +33,12 @@ ProfileNodeRow: TypeAlias = tuple[
 ]
 
 
-def _is_stale(value: datetime | None, refresh_seconds: int) -> bool:
+def _was_refreshed_since(value: datetime | None, threshold: datetime) -> bool:
     if value is None:
-        return True
+        return False
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
-    return value < datetime.now(UTC) - timedelta(seconds=refresh_seconds)
+    return value >= threshold
 
 
 async def profile_nodes(
@@ -73,72 +78,116 @@ async def profile_nodes(
     return sorted(rows, key=sort_key)
 
 
-async def refresh_profile_sources(runtime: AppRuntime, profile_id: str) -> None:
-    async with runtime.database.sessions() as session:
-        if not (await get_relay_settings(session)).auto_refresh_enabled:
-            return
-        subscriptions = (
-            await session.scalars(
-                select(Subscription)
-                .join(
-                    ProfileSubscription,
-                    ProfileSubscription.subscription_id == Subscription.id,
-                )
-                .where(
-                    ProfileSubscription.profile_id == profile_id,
-                    Subscription.enabled.is_(True),
-                )
-                .order_by(Subscription.priority)
-            )
-        ).all()
+async def refresh_profile_sources(
+    runtime: AppRuntime,
+    profile_id: str,
+    *,
+    auto_refresh_enabled: bool,
+) -> None:
+    if not auto_refresh_enabled:
+        return
 
-    for subscription in subscriptions:
-        if not _is_stale(
-            subscription.last_sync_at,
-            runtime.settings.refresh_seconds,
-        ):
-            continue
+    requested_at = datetime.now(UTC)
+    # Only one request schedules refreshes at a time. A request that waited for
+    # a newer completed refresh can reuse it instead of creating a stampede.
+    async with runtime.refresh_lock:
         async with runtime.database.sessions() as session:
-            current = await session.get(Subscription, subscription.id)
-            if current is None:
-                continue
-            try:
-                await sync_subscription(
-                    session,
-                    current,
+            subscriptions = (
+                await session.scalars(
+                    select(Subscription)
+                    .join(
+                        ProfileSubscription,
+                        ProfileSubscription.subscription_id == Subscription.id,
+                    )
+                    .where(
+                        ProfileSubscription.profile_id == profile_id,
+                        Subscription.enabled.is_(True),
+                    )
+                    .order_by(Subscription.priority)
+                )
+            ).all()
+
+        subscriptions_to_refresh = [
+            subscription
+            for subscription in subscriptions
+            if not _was_refreshed_since(subscription.last_sync_at, requested_at)
+        ]
+        if not subscriptions_to_refresh:
+            return
+
+        # Network waits dominate synchronization, so fetch independent sources
+        # concurrently. The database update remains one atomic transaction.
+        semaphore = asyncio.Semaphore(8)
+
+        async def prepare(
+            subscription: Subscription,
+        ) -> PreparedSubscriptionSync:
+            async with semaphore:
+                return await prepare_subscription_sync(
+                    subscription,
                     runtime.settings,
                     runtime.secret_box,
                 )
-            except (httpx.HTTPError, ValueError):
-                continue
+
+        results = await asyncio.gather(
+            *(prepare(subscription) for subscription in subscriptions_to_refresh),
+            return_exceptions=True,
+        )
+        prepared_syncs: list[PreparedSubscriptionSync] = []
+        errors: dict[str, Exception] = {}
+        for subscription, result in zip(
+            subscriptions_to_refresh,
+            results,
+            strict=True,
+        ):
+            if isinstance(result, Exception):
+                errors[subscription.id] = result
+            else:
+                prepared_syncs.append(result)
+
+        async with runtime.database.sessions() as session:
+            await persist_subscription_syncs(
+                session,
+                prepared_syncs,
+                errors,
+                runtime.secret_box,
+            )
 
 
 async def render_profile(
     request: Request,
+    background_tasks: BackgroundTasks,
     runtime: AppRuntime,
     profile: Profile,
+    relay_settings: RelaySettings,
     *,
     request_type: str,
 ) -> Response:
     if not profile.enabled:
-        await record_subscription_request(
+        background_tasks.add_task(
+            record_subscription_request,
             request,
             runtime,
             profile,
             request_type=request_type,
             status_code=404,
             error="Profile disabled",
+            request_logging_enabled=relay_settings.request_logging_enabled,
+            device_tracking_enabled=relay_settings.device_tracking_enabled,
         )
         return JSONResponse(status_code=404, content={"detail": "Profile disabled"})
 
-    await refresh_profile_sources(runtime, profile.id)
+    await refresh_profile_sources(
+        runtime,
+        profile.id,
+        auto_refresh_enabled=relay_settings.auto_refresh_enabled,
+    )
     async with runtime.database.sessions() as session:
-        settings = await get_relay_settings(session)
         rows = await profile_nodes(session, profile.id)
         uris: list[str] = []
         seen: set[str] = set()
         for node, _, _ in rows:
-            if settings.deduplicate_servers and node.fingerprint in seen:
+            if relay_settings.deduplicate_servers and node.fingerprint in seen:
                 continue
             seen.add(node.fingerprint)
             try:
@@ -148,13 +197,16 @@ async def render_profile(
 
     if not uris:
         error = "No healthy nodes are available for this profile"
-        await record_subscription_request(
+        background_tasks.add_task(
+            record_subscription_request,
             request,
             runtime,
             profile,
             request_type=request_type,
             status_code=502,
             error=error,
+            request_logging_enabled=relay_settings.request_logging_enabled,
+            device_tracking_enabled=relay_settings.device_tracking_enabled,
         )
         return JSONResponse(
             status_code=502,
@@ -162,13 +214,16 @@ async def render_profile(
             headers={"Cache-Control": "no-store"},
         )
 
-    await record_subscription_request(
+    background_tasks.add_task(
+        record_subscription_request,
         request,
         runtime,
         profile,
         request_type=request_type,
         status_code=200,
         node_count=len(uris),
+        request_logging_enabled=relay_settings.request_logging_enabled,
+        device_tracking_enabled=relay_settings.device_tracking_enabled,
     )
     return Response(
         content=encode_subscription(uris),

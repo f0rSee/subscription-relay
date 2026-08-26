@@ -39,6 +39,13 @@ class ParsedNode:
     position: int
 
 
+@dataclass(frozen=True)
+class PreparedSubscriptionSync:
+    subscription_id: str
+    nodes: tuple[ParsedNode, ...]
+    synced_at: datetime
+
+
 def _decode_base64_text(value: str) -> str | None:
     compact = "".join(value.split())
     if not compact:
@@ -130,29 +137,66 @@ async def fetch_subscription(
             return bytes(body), response.headers
 
 
-async def sync_subscription(
-    session: AsyncSession,
+async def prepare_subscription_sync(
     subscription: Subscription,
     settings: Settings,
     secret_box: SecretBox,
-) -> int:
-    subscription_id = subscription.id
-    try:
-        url = secret_box.decrypt(subscription.url_ciphertext)
-        body, _ = await fetch_subscription(url, settings)
-        parsed_nodes = parse_subscription(body)
-        if not parsed_nodes:
-            raise ValueError("Upstream response does not contain supported nodes")
+) -> PreparedSubscriptionSync:
+    url = secret_box.decrypt(subscription.url_ciphertext)
+    body, _ = await fetch_subscription(url, settings)
+    parsed_nodes = parse_subscription(body)
+    if not parsed_nodes:
+        raise ValueError("Upstream response does not contain supported nodes")
+    return PreparedSubscriptionSync(
+        subscription_id=subscription.id,
+        nodes=tuple(parsed_nodes),
+        synced_at=datetime.now(UTC),
+    )
 
-        now = datetime.now(UTC)
-        existing_result = await session.execute(
-            select(Node).where(Node.subscription_id == subscription_id)
-        )
-        existing = {node.id: node for node in existing_result.scalars()}
+
+async def persist_subscription_syncs(
+    session: AsyncSession,
+    prepared_syncs: list[PreparedSubscriptionSync],
+    errors: dict[str, Exception],
+    secret_box: SecretBox,
+) -> None:
+    subscription_ids = {
+        prepared.subscription_id for prepared in prepared_syncs
+    } | set(errors)
+    if not subscription_ids:
+        return
+
+    subscriptions = {
+        subscription.id: subscription
+        for subscription in (
+            await session.scalars(
+                select(Subscription).where(Subscription.id.in_(subscription_ids))
+            )
+        ).all()
+    }
+    successful_ids = {prepared.subscription_id for prepared in prepared_syncs}
+    existing_by_subscription: dict[str, dict[str, Node]] = {
+        subscription_id: {} for subscription_id in successful_ids
+    }
+    if successful_ids:
+        existing_nodes = (
+            await session.scalars(
+                select(Node).where(Node.subscription_id.in_(successful_ids))
+            )
+        ).all()
+        for node in existing_nodes:
+            existing_by_subscription[node.subscription_id][node.id] = node
+
+    stale_node_ids: set[str] = set()
+    for prepared in prepared_syncs:
+        subscription = subscriptions.get(prepared.subscription_id)
+        if subscription is None:
+            continue
+        existing = existing_by_subscription[prepared.subscription_id]
         active_ids: set[str] = set()
         fingerprint_occurrences: dict[str, int] = {}
 
-        for parsed in parsed_nodes:
+        for parsed in prepared.nodes:
             occurrence = fingerprint_occurrences.get(parsed.fingerprint, 0)
             fingerprint_occurrences[parsed.fingerprint] = occurrence + 1
             node_identity = (
@@ -161,21 +205,21 @@ async def sync_subscription(
                 else f"{parsed.fingerprint}:{occurrence}"
             )
             node_id = hashlib.sha256(
-                f"{subscription_id}:{node_identity}".encode()
+                f"{prepared.subscription_id}:{node_identity}".encode()
             ).hexdigest()
             active_ids.add(node_id)
             node = existing.get(node_id)
             if node is None:
                 node = Node(
                     id=node_id,
-                    subscription_id=subscription_id,
+                    subscription_id=prepared.subscription_id,
                     fingerprint=parsed.fingerprint,
                     name=parsed.name,
                     protocol=parsed.protocol,
                     host=parsed.host,
                     uri_ciphertext=secret_box.encrypt(parsed.uri),
                     source_position=parsed.position,
-                    last_seen_at=now,
+                    last_seen_at=prepared.synced_at,
                 )
                 session.add(node)
             else:
@@ -184,23 +228,48 @@ async def sync_subscription(
                 node.host = parsed.host
                 node.uri_ciphertext = secret_box.encrypt(parsed.uri)
                 node.source_position = parsed.position
-                node.last_seen_at = now
+                node.last_seen_at = prepared.synced_at
 
-        stale_ids = set(existing) - active_ids
-        if stale_ids:
-            await session.execute(delete(Node).where(Node.id.in_(stale_ids)))
+        stale_node_ids.update(set(existing) - active_ids)
 
         subscription.status = "healthy"
-        subscription.node_count = len(parsed_nodes)
+        subscription.node_count = len(prepared.nodes)
         subscription.last_error = None
-        subscription.last_sync_at = now
-        await session.commit()
-        return len(parsed_nodes)
+        subscription.last_sync_at = prepared.synced_at
+
+    if stale_node_ids:
+        await session.execute(delete(Node).where(Node.id.in_(stale_node_ids)))
+
+    for subscription_id, error in errors.items():
+        subscription = subscriptions.get(subscription_id)
+        if subscription is not None:
+            subscription.status = "error"
+            subscription.last_error = str(error)[:1000]
+
+    await session.commit()
+
+
+async def sync_subscription(
+    session: AsyncSession,
+    subscription: Subscription,
+    settings: Settings,
+    secret_box: SecretBox,
+) -> int:
+    subscription_id = subscription.id
+    try:
+        prepared = await prepare_subscription_sync(
+            subscription,
+            settings,
+            secret_box,
+        )
+        await persist_subscription_syncs(session, [prepared], {}, secret_box)
+        return len(prepared.nodes)
     except Exception as exc:
         await session.rollback()
-        current = await session.get(Subscription, subscription_id)
-        if current is not None:
-            current.status = "error"
-            current.last_error = str(exc)[:1000]
-            await session.commit()
+        await persist_subscription_syncs(
+            session,
+            [],
+            {subscription_id: exc},
+            secret_box,
+        )
         raise

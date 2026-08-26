@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 from .config import Settings
@@ -13,6 +14,7 @@ class AppRuntime:
     database: Database
     secret_box: SecretBox
     sessions: SessionManager
+    refresh_lock: asyncio.Lock
 
 
 def create_runtime(settings: Settings) -> AppRuntime:
@@ -21,4 +23,5 @@ def create_runtime(settings: Settings) -> AppRuntime:
         database=Database(settings),
         secret_box=SecretBox(settings.app_encryption_key),
         sessions=SessionManager(settings),
+        refresh_lock=asyncio.Lock(),
     )

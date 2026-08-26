@@ -168,6 +168,58 @@ def test_combines_sources_and_persists_profile_order(tmp_path, monkeypatch):
     asyncio.run(with_client(app, scenario))
 
 
+def test_refreshes_all_sources_concurrently_before_each_response(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(settings_for(tmp_path))
+    active_fetches = 0
+    max_active_fetches = 0
+    calls_by_url: dict[str, int] = {}
+
+    async def fake_fetch(url, settings):
+        nonlocal active_fetches, max_active_fetches
+        calls_by_url[url] = calls_by_url.get(url, 0) + 1
+        version = calls_by_url[url]
+        active_fetches += 1
+        max_active_fetches = max(max_active_fetches, active_fetches)
+        try:
+            await asyncio.sleep(0.05)
+        finally:
+            active_fetches -= 1
+        host = "one.example" if "provider.example" in url else "two.example"
+        body = f"vless://v{version}@{host}:443#{host}\n".encode()
+        return body, httpx.Headers({"content-type": "text/plain"})
+
+    monkeypatch.setattr(
+        "backend.app.services.subscriptions.fetch_subscription",
+        fake_fetch,
+    )
+
+    async def scenario(client: httpx.AsyncClient):
+        csrf = await login(client)
+        created = await client.post(
+            "/api/subscriptions",
+            headers={"X-CSRF-Token": csrf},
+            json={"name": "Second", "url": "https://second.example/sub"},
+        )
+        assert created.status_code == 201
+
+        first = await client.get("/s/test-relay-token-at-least-16")
+        assert first.status_code == 200
+        assert max_active_fetches == 2
+        assert all(count == 1 for count in calls_by_url.values())
+
+        second = await client.get("/s/test-relay-token-at-least-16")
+        assert second.status_code == 200
+        decoded = base64.b64decode(second.content).decode().splitlines()
+        assert len(decoded) == 2
+        assert all("vless://v2@" in uri for uri in decoded)
+        assert all(count == 2 for count in calls_by_url.values())
+
+    asyncio.run(with_client(app, scenario))
+
+
 def test_default_profile_and_empty_upstream_error(tmp_path, monkeypatch):
     app = create_app(settings_for(tmp_path))
 

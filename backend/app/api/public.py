@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import select, text
 
-from ..dependencies import RuntimeDep, SessionDep
-from ..models import Profile
+from ..dependencies import RuntimeDep
+from ..models import Profile, RelaySettings
 from ..services.profiles import render_profile
 
 router = APIRouter(tags=["public"])
@@ -37,15 +37,25 @@ async def healthz(runtime: RuntimeDep) -> Response:
 async def public_profile(
     token: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     runtime: RuntimeDep,
-    session: SessionDep,
 ) -> Response:
-    profile = await session.scalar(select(Profile).where(Profile.token == token))
-    if profile is None:
+    async with runtime.database.sessions() as session:
+        row = (
+            await session.execute(
+                select(Profile, RelaySettings)
+                .join(RelaySettings, RelaySettings.id == 1)
+                .where(Profile.token == token)
+            )
+        ).one_or_none()
+    if row is None:
         return JSONResponse(status_code=404, content={"detail": "Profile not found"})
+    profile, relay_settings = row
     return await render_profile(
         request,
+        background_tasks,
         runtime,
         profile,
+        relay_settings,
         request_type="profile",
     )
