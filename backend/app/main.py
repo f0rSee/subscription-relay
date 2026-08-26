@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -16,10 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .config import ConfigurationError, Settings, get_settings
 from .database import Database
 from .models import (
+    ClientDevice,
     Node,
     Profile,
     ProfileNodePreference,
     ProfileSubscription,
+    RelaySettings,
+    RequestLog,
     Subscription,
     SyncRun,
 )
@@ -28,6 +32,7 @@ from .schemas import (
     NodeOrderUpdate,
     ProfileCreate,
     ProfileUpdate,
+    RelaySettingsUpdate,
     SubscriptionCreate,
     SubscriptionUpdate,
 )
@@ -39,7 +44,11 @@ from .security import (
     SessionManager,
     require_admin,
 )
-from .subscription_service import encode_subscription, sync_subscription
+from .subscription_service import (
+    UPSTREAM_USER_AGENT,
+    encode_subscription,
+    sync_subscription,
+)
 
 
 PASSTHROUGH_RESPONSE_HEADERS = {
@@ -96,6 +105,9 @@ def _is_stale(value: datetime | None, refresh_seconds: int) -> bool:
 
 async def _bootstrap(database: Database, settings: Settings, secret_box: SecretBox) -> None:
     async with database.sessions() as session:
+        if await session.get(RelaySettings, 1) is None:
+            session.add(RelaySettings(id=1))
+
         profile = await session.scalar(
             select(Profile).where(Profile.token == settings.relay_token)
         )
@@ -147,6 +159,101 @@ async def _bootstrap(database: Database, settings: Settings, secret_box: SecretB
                         )
                     )
         await session.commit()
+
+
+async def _relay_settings(session: AsyncSession) -> RelaySettings:
+    relay_settings = await session.get(RelaySettings, 1)
+    if relay_settings is None:
+        relay_settings = RelaySettings(id=1)
+        session.add(relay_settings)
+        await session.flush()
+    return relay_settings
+
+
+def _settings_view(settings: RelaySettings) -> dict:
+    return {
+        "deduplicate_servers": settings.deduplicate_servers,
+        "request_logging_enabled": settings.request_logging_enabled,
+        "device_tracking_enabled": settings.device_tracking_enabled,
+        "auto_refresh_enabled": settings.auto_refresh_enabled,
+        "updated_at": _iso(settings.updated_at),
+    }
+
+
+def _client_identity(request: Request) -> tuple[str, str, str]:
+    user_agent = request.headers.get("user-agent", "Unknown client").strip()[:512]
+    ip_address = (request.client.host if request.client else "unknown")[:64]
+    product = user_agent.split(" ", 1)[0].split("/", 1)[0].strip()
+    client_name = (product or "Unknown client")[:160]
+    return client_name, user_agent, ip_address
+
+
+async def _record_subscription_request(
+    request: Request,
+    profile: Profile,
+    *,
+    request_type: str,
+    status_code: int,
+    node_count: int = 0,
+    error: str | None = None,
+) -> None:
+    database: Database = request.app.state.database
+    app_settings: Settings = request.app.state.settings
+    client_name, user_agent, ip_address = _client_identity(request)
+    now = datetime.now(timezone.utc)
+
+    try:
+        async with database.sessions() as session:
+            relay_settings = await _relay_settings(session)
+            device_id: str | None = None
+
+            if relay_settings.device_tracking_enabled:
+                device_id = hashlib.sha256(
+                    f"{app_settings.session_secret}\0{ip_address}\0{user_agent}".encode()
+                ).hexdigest()
+                device = await session.get(ClientDevice, device_id)
+                if device is None:
+                    device = ClientDevice(
+                        id=device_id,
+                        name=client_name,
+                        user_agent=user_agent,
+                        ip_address=ip_address,
+                        request_count=1,
+                        last_profile_name=profile.name,
+                        last_status_code=status_code,
+                        first_seen_at=now,
+                        last_seen_at=now,
+                    )
+                    session.add(device)
+                else:
+                    device.name = client_name
+                    device.user_agent = user_agent
+                    device.ip_address = ip_address
+                    device.request_count += 1
+                    device.last_profile_name = profile.name
+                    device.last_status_code = status_code
+                    device.last_seen_at = now
+
+            if relay_settings.request_logging_enabled:
+                session.add(
+                    RequestLog(
+                        profile_id=profile.id,
+                        profile_name=profile.name,
+                        request_type=request_type,
+                        device_id=device_id,
+                        client_name=client_name,
+                        user_agent=user_agent,
+                        ip_address=ip_address,
+                        status_code=status_code,
+                        node_count=node_count,
+                        error=error[:1000] if error else None,
+                        requested_at=now,
+                    )
+                )
+            await session.commit()
+    except Exception:
+        # Observability must never make a working subscription unavailable.
+        return
 
 
 def _subscription_view(subscription: Subscription, secret_box: SecretBox) -> dict:
@@ -209,13 +316,13 @@ async def _profile_nodes(
     return sorted(rows, key=sort_key)
 
 
-async def _refresh_profile_sources(
-    app: FastAPI, profile_id: str, user_agent: str
-) -> None:
+async def _refresh_profile_sources(app: FastAPI, profile_id: str) -> None:
     database: Database = app.state.database
     settings: Settings = app.state.settings
     secret_box: SecretBox = app.state.secret_box
     async with database.sessions() as session:
+        if not (await _relay_settings(session)).auto_refresh_enabled:
+            return
         subscriptions = (
             await session.scalars(
                 select(Subscription)
@@ -240,7 +347,7 @@ async def _refresh_profile_sources(
                 continue
             try:
                 await sync_subscription(
-                    session, current, settings, secret_box, user_agent
+                    session, current, settings, secret_box, UPSTREAM_USER_AGENT
                 )
             except (httpx.HTTPError, ValueError):
                 # A stale source must not take down profiles backed by other sources.
@@ -248,26 +355,30 @@ async def _refresh_profile_sources(
 
 
 async def _render_profile(
-    request: Request, profile: Profile
+    request: Request, profile: Profile, *, request_type: str
 ) -> Response:
     if not profile.enabled:
+        await _record_subscription_request(
+            request,
+            profile,
+            request_type=request_type,
+            status_code=404,
+            error="Profile disabled",
+        )
         return JSONResponse(status_code=404, content={"detail": "Profile disabled"})
 
-    await _refresh_profile_sources(
-        request.app,
-        profile.id,
-        request.headers.get("user-agent", "subscription-relay/2.0"),
-    )
+    await _refresh_profile_sources(request.app, profile.id)
     database: Database = request.app.state.database
     secret_box: SecretBox = request.app.state.secret_box
     async with database.sessions() as session:
+        relay_settings = await _relay_settings(session)
         rows = await _profile_nodes(session, profile.id)
         uris: list[str] = []
         seen: set[str] = set()
         for node, _, preference in rows:
             if preference and not preference.enabled:
                 continue
-            if node.fingerprint in seen:
+            if relay_settings.deduplicate_servers and node.fingerprint in seen:
                 continue
             seen.add(node.fingerprint)
             try:
@@ -276,11 +387,25 @@ async def _render_profile(
                 continue
 
     if not uris:
+        await _record_subscription_request(
+            request,
+            profile,
+            request_type=request_type,
+            status_code=502,
+            error="No healthy nodes are available for this profile",
+        )
         return JSONResponse(
             status_code=502,
             content={"detail": "No healthy nodes are available for this profile"},
             headers={"Cache-Control": "no-store"},
         )
+    await _record_subscription_request(
+        request,
+        profile,
+        request_type=request_type,
+        status_code=200,
+        node_count=len(uris),
+    )
     return Response(
         content=encode_subscription(uris),
         media_type="text/plain",
@@ -360,7 +485,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             )
             if profile is None:
                 return JSONResponse(status_code=503, content={"detail": "No profile"})
-            return await _render_profile(request, profile)
+            return await _render_profile(request, profile, request_type="legacy")
 
     @app.get("/s/{token}", include_in_schema=False)
     async def public_profile(request: Request, token: str) -> Response:
@@ -368,7 +493,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             profile = await session.scalar(select(Profile).where(Profile.token == token))
             if profile is None:
                 return JSONResponse(status_code=404, content={"detail": "Profile not found"})
-            return await _render_profile(request, profile)
+            return await _render_profile(request, profile, request_type="profile")
 
     @app.post("/api/auth/login")
     async def login(payload: LoginRequest) -> Response:
@@ -425,11 +550,19 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             )
             nodes = await session.scalar(select(func.count()).select_from(Node))
             profiles = await session.scalar(select(func.count()).select_from(Profile))
+            request_logs = await session.scalar(
+                select(func.count()).select_from(RequestLog)
+            )
+            devices = await session.scalar(
+                select(func.count()).select_from(ClientDevice)
+            )
         return {
             "subscriptions": subscriptions or 0,
             "healthy_subscriptions": healthy or 0,
             "nodes": nodes or 0,
             "profiles": profiles or 0,
+            "request_logs": request_logs or 0,
+            "devices": devices or 0,
             "persistent_storage": settings.persistent_database,
         }
 
@@ -747,6 +880,85 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 for run, name in rows
             ]
 
+    @app.get("/api/request-logs")
+    async def list_request_logs(
+        limit: int = Query(default=100, ge=1, le=500),
+        _: AdminSession = Depends(require_admin),
+    ) -> list[dict]:
+        async with database.sessions() as session:
+            logs = (
+                await session.scalars(
+                    select(RequestLog)
+                    .order_by(RequestLog.requested_at.desc())
+                    .limit(limit)
+                )
+            ).all()
+            return [
+                {
+                    "id": log.id,
+                    "profile_id": log.profile_id,
+                    "profile_name": log.profile_name,
+                    "request_type": log.request_type,
+                    "device_id": log.device_id,
+                    "client_name": log.client_name,
+                    "user_agent": log.user_agent,
+                    "ip_address": log.ip_address,
+                    "status_code": log.status_code,
+                    "node_count": log.node_count,
+                    "error": log.error,
+                    "requested_at": _iso(log.requested_at),
+                }
+                for log in logs
+            ]
+
+    @app.get("/api/devices")
+    async def list_devices(
+        limit: int = Query(default=100, ge=1, le=500),
+        _: AdminSession = Depends(require_admin),
+    ) -> list[dict]:
+        async with database.sessions() as session:
+            devices = (
+                await session.scalars(
+                    select(ClientDevice)
+                    .order_by(ClientDevice.last_seen_at.desc())
+                    .limit(limit)
+                )
+            ).all()
+            return [
+                {
+                    "id": device.id,
+                    "name": device.name,
+                    "user_agent": device.user_agent,
+                    "ip_address": device.ip_address,
+                    "request_count": device.request_count,
+                    "last_profile_name": device.last_profile_name,
+                    "last_status_code": device.last_status_code,
+                    "first_seen_at": _iso(device.first_seen_at),
+                    "last_seen_at": _iso(device.last_seen_at),
+                }
+                for device in devices
+            ]
+
+    @app.get("/api/settings")
+    async def get_relay_settings(
+        _: AdminSession = Depends(require_admin),
+    ) -> dict:
+        async with database.sessions() as session:
+            return _settings_view(await _relay_settings(session))
+
+    @app.patch("/api/settings")
+    async def update_relay_settings(
+        payload: RelaySettingsUpdate,
+        _: AdminSession = Depends(require_admin),
+    ) -> dict:
+        async with database.sessions() as session:
+            relay_settings = await _relay_settings(session)
+            for key, value in payload.model_dump(exclude_none=True).items():
+                setattr(relay_settings, key, value)
+            relay_settings.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+            return _settings_view(relay_settings)
+
     frontend_dist: Path = settings.frontend_dist
     assets_dir = frontend_dist / "assets"
     if assets_dir.is_dir():
@@ -769,13 +981,14 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
 try:
     app = create_app()
 except ConfigurationError as exc:
+    configuration_error = str(exc)
     fallback = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     @fallback.get("/healthz", include_in_schema=False)
     async def misconfigured_health() -> Response:
         return JSONResponse(
             status_code=503,
-            content={"status": "misconfigured", "detail": str(exc)},
+            content={"status": "misconfigured", "detail": configuration_error},
             headers={"Cache-Control": "no-store"},
         )
 

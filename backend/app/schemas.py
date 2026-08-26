@@ -36,3 +36,10 @@ class ProfileUpdate(BaseModel):
 
 class NodeOrderUpdate(BaseModel):
     node_ids: list[str] = Field(max_length=10000)
+
+
+class RelaySettingsUpdate(BaseModel):
+    deduplicate_servers: bool | None = None
+    request_logging_enabled: bool | None = None
+    device_tracking_enabled: bool | None = None
+    auto_refresh_enabled: bool | None = None

@@ -28,6 +28,11 @@ SUPPORTED_PROTOCOLS = (
     "wireguard",
 )
 
+# Subscription providers often change their response format based on User-Agent.
+# A stable service identity keeps synchronization in the URI-list format that the
+# parser needs, regardless of which VPN client requested the relay profile.
+UPSTREAM_USER_AGENT = "subscription-relay/2.0"
+
 
 @dataclass(frozen=True)
 class ParsedNode:
@@ -85,7 +90,6 @@ def parse_subscription(body: bytes) -> list[ParsedNode]:
         text = decoded
 
     nodes: list[ParsedNode] = []
-    seen: set[str] = set()
     for line in text.splitlines():
         uri = line.strip()
         if not uri or "://" not in uri:
@@ -95,9 +99,6 @@ def parse_subscription(body: bytes) -> list[ParsedNode]:
             continue
         normalized = uri.split("#", 1)[0]
         fingerprint = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-        if fingerprint in seen:
-            continue
-        seen.add(fingerprint)
         name, protocol, host = _node_metadata(uri)
         nodes.append(
             ParsedNode(
@@ -118,9 +119,9 @@ def encode_subscription(uris: list[str]) -> bytes:
 
 
 async def fetch_subscription(
-    url: str, user_agent: str, settings: Settings
+    url: str, _user_agent: str, settings: Settings
 ) -> tuple[bytes, httpx.Headers]:
-    headers = {"User-Agent": user_agent, "Accept": "*/*"}
+    headers = {"User-Agent": UPSTREAM_USER_AGENT, "Accept": "text/plain, */*"}
     timeout = httpx.Timeout(settings.timeout_seconds)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         async with client.stream("GET", url, headers=headers) as response:
@@ -157,10 +158,18 @@ async def sync_subscription(
         )
         existing = {node.id: node for node in existing_result.scalars()}
         active_ids: set[str] = set()
+        fingerprint_occurrences: dict[str, int] = {}
 
         for parsed in parsed_nodes:
+            occurrence = fingerprint_occurrences.get(parsed.fingerprint, 0)
+            fingerprint_occurrences[parsed.fingerprint] = occurrence + 1
+            node_identity = (
+                parsed.fingerprint
+                if occurrence == 0
+                else f"{parsed.fingerprint}:{occurrence}"
+            )
             node_id = hashlib.sha256(
-                f"{subscription.id}:{parsed.fingerprint}".encode("utf-8")
+                f"{subscription.id}:{node_identity}".encode("utf-8")
             ).hexdigest()
             active_ids.add(node_id)
             node = existing.get(node_id)

@@ -15,6 +15,8 @@ export interface DashboardSummary {
   healthy_subscriptions: number
   nodes: number
   profiles: number
+  request_logs: number
+  devices: number
   persistent_storage: boolean
 }
 
@@ -54,6 +56,41 @@ export interface ProfileNode {
   duplicate: boolean
 }
 
+export interface RequestLog {
+  id: string
+  profile_id: string | null
+  profile_name: string
+  request_type: "legacy" | "profile" | string
+  device_id: string | null
+  client_name: string
+  user_agent: string
+  ip_address: string
+  status_code: number
+  node_count: number
+  error: string | null
+  requested_at: string
+}
+
+export interface ClientDevice {
+  id: string
+  name: string
+  user_agent: string
+  ip_address: string
+  request_count: number
+  last_profile_name: string | null
+  last_status_code: number | null
+  first_seen_at: string
+  last_seen_at: string
+}
+
+export interface RelaySettings {
+  deduplicate_servers: boolean
+  request_logging_enabled: boolean
+  device_tracking_enabled: boolean
+  auto_refresh_enabled: boolean
+  updated_at: string
+}
+
 export interface SubscriptionInput {
   name: string
   url: string
@@ -65,3 +102,13 @@ export interface ProfileInput {
   name: string
   subscription_ids: string[]
 }
+
+export type RelaySettingsInput = Partial<
+  Pick<
+    RelaySettings,
+    | "deduplicate_servers"
+    | "request_logging_enabled"
+    | "device_tracking_enabled"
+    | "auto_refresh_enabled"
+  >
+>

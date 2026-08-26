@@ -289,7 +289,7 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
         <div>
           <FrameTitle>Источники подписок</FrameTitle>
           <FrameDescription>
-            Сервис забирает данные по URL и объединяет уникальные серверы.
+            Сервис забирает данные по URL и обновляет список серверов для профилей.
           </FrameDescription>
         </div>
         <AddSubscriptionDialog onCreate={onCreate} />

@@ -7,7 +7,7 @@ import pytest
 
 from backend.app.config import Settings, _normalize_database_url
 from backend.app.main import create_app
-from backend.app.subscription_service import parse_subscription
+from backend.app.subscription_service import UPSTREAM_USER_AGENT, parse_subscription
 
 
 def settings_for(tmp_path: Path) -> Settings:
@@ -189,5 +189,101 @@ def test_legacy_token_and_empty_upstream_error(tmp_path, monkeypatch):
     async def login_and_list(client: httpx.AsyncClient):
         await login(client)
         return (await client.get("/api/subscriptions")).json()
+
+    asyncio.run(with_client(app, scenario))
+
+
+def test_request_logs_devices_settings_and_deduplication(tmp_path, monkeypatch):
+    app = create_app(settings_for(tmp_path))
+    upstream = base64.b64encode(
+        b"vless://same@same.example:443#Same\n"
+        b"vless://same@same.example:443#Same copy\n"
+    )
+    seen_user_agents = []
+
+    async def fake_fetch(url, user_agent, settings):
+        seen_user_agents.append(user_agent)
+        return upstream, httpx.Headers({"content-type": "text/plain"})
+
+    monkeypatch.setattr(
+        "backend.app.subscription_service.fetch_subscription", fake_fetch
+    )
+
+    async def scenario(client: httpx.AsyncClient):
+        csrf = await login(client)
+        subscriptions = (await client.get("/api/subscriptions")).json()
+        first_source_id = subscriptions[0]["id"]
+
+        first_request = await client.get(
+            "/subscription",
+            headers={
+                "X-Relay-Token": "test-relay-token-at-least-16",
+                "User-Agent": "v2rayNG/1.10.11",
+            },
+        )
+        assert first_request.status_code == 200
+        assert seen_user_agents == [UPSTREAM_USER_AGENT]
+
+        logs = (await client.get("/api/request-logs")).json()
+        assert len(logs) == 1
+        assert logs[0]["client_name"] == "v2rayNG"
+        assert logs[0]["status_code"] == 200
+        assert logs[0]["node_count"] == 2
+        assert "test-relay-token" not in str(logs[0])
+
+        devices = (await client.get("/api/devices")).json()
+        assert len(devices) == 1
+        assert devices[0]["name"] == "v2rayNG"
+        assert devices[0]["request_count"] == 1
+
+        settings = (await client.get("/api/settings")).json()
+        assert settings["deduplicate_servers"] is False
+        assert settings["request_logging_enabled"] is True
+        assert settings["device_tracking_enabled"] is True
+        assert settings["auto_refresh_enabled"] is True
+
+        second_source = await client.post(
+            "/api/subscriptions",
+            headers={"X-CSRF-Token": csrf},
+            json={"name": "Second", "url": "https://second.example/sub"},
+        )
+        assert second_source.status_code == 201
+        second_source_id = second_source.json()["id"]
+        second_sync = await client.post(
+            f"/api/subscriptions/{second_source_id}/sync",
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert second_sync.status_code == 200
+
+        profile_response = await client.post(
+            "/api/profiles",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "name": "Duplicates",
+                "subscription_ids": [first_source_id, second_source_id],
+            },
+        )
+        profile = profile_response.json()
+        duplicated = await client.get(profile["url"])
+        assert len(base64.b64decode(duplicated.content).decode().splitlines()) == 4
+
+        updated = await client.patch(
+            "/api/settings",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "deduplicate_servers": True,
+                "request_logging_enabled": False,
+                "device_tracking_enabled": False,
+            },
+        )
+        assert updated.status_code == 200
+        assert updated.json()["deduplicate_servers"] is True
+
+        deduplicated = await client.get(profile["url"])
+        assert len(base64.b64decode(deduplicated.content).decode().splitlines()) == 1
+        assert len((await client.get("/api/request-logs")).json()) == 2
+        devices_after_disable = (await client.get("/api/devices")).json()
+        assert len(devices_after_disable) == 2
+        assert sum(device["request_count"] for device in devices_after_disable) == 2
 
     asyncio.run(with_client(app, scenario))

@@ -2,10 +2,14 @@ import { useCallback, useEffect, useState } from "react"
 import { api, ApiError, setCsrfToken } from "@/api/client"
 import type {
   AuthSession,
+  ClientDevice,
   DashboardSummary,
   Profile,
   ProfileInput,
   ProfileNode,
+  RelaySettings,
+  RelaySettingsInput,
+  RequestLog,
   Subscription,
   SubscriptionInput,
 } from "@/api/types"
@@ -13,12 +17,15 @@ import {
   DashboardSidebar,
   type DashboardView,
 } from "@/components/dashboard-sidebar"
+import { DevicesView } from "@/components/devices-view"
 import { LoginView } from "@/components/login-view"
 import { NodeOrderView } from "@/components/node-order-view"
 import { ProfilesView } from "@/components/profiles-view"
+import { RequestLogsView } from "@/components/request-logs-view"
 import { Alert, AlertDescription, AlertTitle } from "@/components/reui/alert"
 import { Frame, FramePanel } from "@/components/reui/frame"
 import { SubscriptionsView } from "@/components/subscriptions-view"
+import { SettingsView } from "@/components/settings-view"
 import {
   SidebarInset,
   SidebarProvider,
@@ -57,6 +64,18 @@ const viewCopy: Record<DashboardView, { title: string; description: string }> = 
     title: "Порядок серверов",
     description: "Управляйте приоритетом серверов для каждого профиля.",
   },
+  logs: {
+    title: "Логи",
+    description: "Следите за обращениями клиентов к ссылкам подписок.",
+  },
+  devices: {
+    title: "Устройства",
+    description: "Просматривайте VPN-клиенты, которые запрашивали подписки.",
+  },
+  settings: {
+    title: "Настройки",
+    description: "Управляйте поведением relay без изменения переменных окружения.",
+  },
 }
 
 function errorMessage(reason: unknown) {
@@ -70,12 +89,21 @@ export default function App() {
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([])
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [nodes, setNodes] = useState<ProfileNode[]>([])
+  const [requestLogs, setRequestLogs] = useState<RequestLog[]>([])
+  const [devices, setDevices] = useState<ClientDevice[]>([])
+  const [relaySettings, setRelaySettings] = useState<RelaySettings | null>(null)
   const [selectedProfileId, setSelectedProfileId] = useState("")
   const [initialError, setInitialError] = useState("")
   const [subscriptionsError, setSubscriptionsError] = useState("")
   const [nodesError, setNodesError] = useState("")
+  const [logsError, setLogsError] = useState("")
+  const [devicesError, setDevicesError] = useState("")
+  const [settingsError, setSettingsError] = useState("")
   const [loadingDashboard, setLoadingDashboard] = useState(false)
   const [loadingNodes, setLoadingNodes] = useState(false)
+  const [loadingLogs, setLoadingLogs] = useState(false)
+  const [loadingDevices, setLoadingDevices] = useState(false)
+  const [loadingSettings, setLoadingSettings] = useState(false)
 
   const loadDashboard = useCallback(async () => {
     setLoadingDashboard(true)
@@ -103,6 +131,52 @@ export default function App() {
       }
     } finally {
       setLoadingDashboard(false)
+    }
+  }, [])
+
+  const loadLogs = useCallback(async () => {
+    setLoadingLogs(true)
+    setLogsError("")
+    try {
+      const [nextLogs, nextSummary] = await Promise.all([
+        api.requestLogs(),
+        api.dashboard(),
+      ])
+      setRequestLogs(nextLogs)
+      setSummary(nextSummary)
+    } catch (reason) {
+      setLogsError(errorMessage(reason))
+    } finally {
+      setLoadingLogs(false)
+    }
+  }, [])
+
+  const loadDevices = useCallback(async () => {
+    setLoadingDevices(true)
+    setDevicesError("")
+    try {
+      const [nextDevices, nextSummary] = await Promise.all([
+        api.devices(),
+        api.dashboard(),
+      ])
+      setDevices(nextDevices)
+      setSummary(nextSummary)
+    } catch (reason) {
+      setDevicesError(errorMessage(reason))
+    } finally {
+      setLoadingDevices(false)
+    }
+  }, [])
+
+  const loadSettings = useCallback(async () => {
+    setLoadingSettings(true)
+    setSettingsError("")
+    try {
+      setRelaySettings(await api.settings())
+    } catch (reason) {
+      setSettingsError(errorMessage(reason))
+    } finally {
+      setLoadingSettings(false)
     }
   }, [])
 
@@ -148,6 +222,9 @@ export default function App() {
     setSubscriptions([])
     setProfiles([])
     setNodes([])
+    setRequestLogs([])
+    setDevices([])
+    setRelaySettings(null)
   }
 
   async function createSubscription(input: SubscriptionInput) {
@@ -201,6 +278,19 @@ export default function App() {
     toast.success("Порядок серверов сохранён")
   }
 
+  async function updateRelaySettings(input: RelaySettingsInput) {
+    const nextSettings = await api.updateSettings(input)
+    setRelaySettings(nextSettings)
+    toast.success("Настройка сохранена")
+  }
+
+  function changeView(view: DashboardView) {
+    setActiveView(view)
+    if (view === "logs") void loadLogs()
+    if (view === "devices") void loadDevices()
+    if (view === "settings") void loadSettings()
+  }
+
   if (!session) {
     return (
       <main className="mx-auto flex min-h-svh max-w-6xl items-center px-4">
@@ -229,8 +319,10 @@ export default function App() {
           subscriptionsCount={subscriptions.length}
           profilesCount={profiles.length}
           nodesCount={summary?.nodes ?? 0}
+          logsCount={summary?.request_logs ?? 0}
+          devicesCount={summary?.devices ?? 0}
           username={session.username}
-          onViewChange={setActiveView}
+          onViewChange={changeView}
           onLogout={logout}
         />
         <SidebarInset className="min-w-0 overflow-x-hidden">
@@ -311,6 +403,30 @@ export default function App() {
                 loading={loadingNodes}
                 error={nodesError}
                 onSave={saveNodeOrder}
+              />
+            )}
+            {activeView === "logs" && (
+              <RequestLogsView
+                logs={requestLogs}
+                loading={loadingLogs}
+                error={logsError}
+                onRefresh={() => void loadLogs()}
+              />
+            )}
+            {activeView === "devices" && (
+              <DevicesView
+                devices={devices}
+                loading={loadingDevices}
+                error={devicesError}
+                onRefresh={() => void loadDevices()}
+              />
+            )}
+            {activeView === "settings" && (
+              <SettingsView
+                settings={relaySettings}
+                loading={loadingSettings}
+                error={settingsError}
+                onUpdate={updateRelaySettings}
               />
             )}
           </div>

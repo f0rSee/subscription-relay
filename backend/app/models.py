@@ -144,3 +144,57 @@ class SyncRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class RelaySettings(Base):
+    __tablename__ = "relay_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    deduplicate_servers: Mapped[bool] = mapped_column(Boolean, default=False)
+    request_logging_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    device_tracking_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    auto_refresh_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class ClientDevice(Base):
+    __tablename__ = "client_devices"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(160))
+    user_agent: Mapped[str] = mapped_column(Text)
+    ip_address: Mapped[str] = mapped_column(String(64))
+    request_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_profile_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    last_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
+class RequestLog(Base):
+    __tablename__ = "request_logs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    profile_id: Mapped[str | None] = mapped_column(
+        ForeignKey("profiles.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    profile_name: Mapped[str] = mapped_column(String(160))
+    request_type: Mapped[str] = mapped_column(String(32))
+    device_id: Mapped[str | None] = mapped_column(
+        ForeignKey("client_devices.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    client_name: Mapped[str] = mapped_column(String(160))
+    user_agent: Mapped[str] = mapped_column(Text)
+    ip_address: Mapped[str] = mapped_column(String(64))
+    status_code: Mapped[int] = mapped_column(Integer)
+    node_count: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )

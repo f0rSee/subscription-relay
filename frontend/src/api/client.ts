@@ -1,9 +1,13 @@
 import type {
   AuthSession,
+  ClientDevice,
   DashboardSummary,
   Profile,
   ProfileInput,
   ProfileNode,
+  RelaySettings,
+  RelaySettingsInput,
+  RequestLog,
   Subscription,
   SubscriptionInput,
 } from "@/api/types"
@@ -103,5 +107,13 @@ export const api = {
     request<{ updated: number }>(`/api/profiles/${id}/node-order`, {
       method: "PUT",
       body: JSON.stringify({ node_ids: nodeIds }),
+    }),
+  requestLogs: () => request<RequestLog[]>("/api/request-logs?limit=200"),
+  devices: () => request<ClientDevice[]>("/api/devices?limit=200"),
+  settings: () => request<RelaySettings>("/api/settings"),
+  updateSettings: (input: RelaySettingsInput) =>
+    request<RelaySettings>("/api/settings", {
+      method: "PATCH",
+      body: JSON.stringify(input),
     }),
 }
