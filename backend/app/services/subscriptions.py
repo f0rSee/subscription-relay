@@ -26,7 +26,7 @@ SUPPORTED_PROTOCOLS = (
     "tuic",
     "wireguard",
 )
-UPSTREAM_USER_AGENT = "Happ/5.6.0/ios/2731171157721"
+UPSTREAM_USER_AGENT = "VPNClient/2.0/ios/2731171157721"
 UPSTREAM_HEADERS = {
     "User-Agent": UPSTREAM_USER_AGENT,
     "Accept": "text/plain, */*",
