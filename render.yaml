@@ -2,6 +2,7 @@ services:
   - type: web
     name: subscription-relay
     runtime: docker
+    region: frankfurt
     plan: free
     healthCheckPath: /healthz
     envVars:
