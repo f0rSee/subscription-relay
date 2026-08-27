@@ -12,7 +12,20 @@ router = APIRouter(tags=["public"])
 
 
 @router.get("/healthz", include_in_schema=False)
-async def healthz(runtime: RuntimeDep) -> Response:
+def healthz(runtime: RuntimeDep) -> Response:
+    return JSONResponse(
+        {
+            "status": "ok",
+            "storage": (
+                "persistent" if runtime.settings.persistent_database else "ephemeral"
+            ),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get("/readyz", include_in_schema=False)
+async def readyz(runtime: RuntimeDep) -> Response:
     try:
         async with runtime.database.sessions() as session:
             await session.execute(text("SELECT 1"))

@@ -77,6 +77,10 @@ def test_health_authentication_and_csrf(tmp_path):
         assert health.status_code == 200
         assert health.json() == {"status": "ok", "storage": "ephemeral"}
 
+        readiness = await client.get("/readyz")
+        assert readiness.status_code == 200
+        assert readiness.json() == {"status": "ok", "storage": "ephemeral"}
+
         unauthorized = await client.get("/api/dashboard")
         assert unauthorized.status_code == 401
 
@@ -111,6 +115,30 @@ def test_health_authentication_and_csrf(tmp_path):
         )
         assert created.status_code == 201
         assert "secret" not in created.json()["url_hint"]
+
+    asyncio.run(with_client(app, scenario))
+
+
+def test_health_does_not_require_database(tmp_path, monkeypatch):
+    app = create_app(settings_for(tmp_path))
+
+    async def scenario(client: httpx.AsyncClient):
+        def unavailable_sessions():
+            raise RuntimeError("database unavailable")
+
+        monkeypatch.setattr(
+            app.state.runtime.database,
+            "sessions",
+            unavailable_sessions,
+        )
+
+        health = await client.get("/healthz")
+        assert health.status_code == 200
+        assert health.json() == {"status": "ok", "storage": "ephemeral"}
+
+        readiness = await client.get("/readyz")
+        assert readiness.status_code == 503
+        assert readiness.json() == {"status": "database_unavailable"}
 
     asyncio.run(with_client(app, scenario))
 
