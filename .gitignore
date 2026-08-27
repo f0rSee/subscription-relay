@@ -4,7 +4,9 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 .agents/
+AGENTS.md
 .claude/
+CLAUDE.md
 .cursor/
 .opencode/
 .mcp.json
