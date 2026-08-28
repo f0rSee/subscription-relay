@@ -16,6 +16,8 @@ services:
         sync: false
       - key: SECURE_COOKIES
         value: true
+      - key: FORWARDED_ALLOW_IPS
+        value: "*"
       - key: APP_ENCRYPTION_KEY
         generateValue: true
       - key: SESSION_SECRET
