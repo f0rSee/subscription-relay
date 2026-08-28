@@ -6,10 +6,16 @@ import httpx
 
 from backend.app.config import Settings, _normalize_database_url
 from backend.app.main import create_app
+from backend.app.models import SubscriptionUsage
 from backend.app.services.subscriptions import (
     UPSTREAM_HEADERS,
     UPSTREAM_USER_AGENT,
     parse_subscription,
+    parse_subscription_userinfo,
+)
+from backend.app.services.traffic import (
+    aggregate_profile_traffic,
+    subscription_userinfo_header,
 )
 
 
@@ -60,6 +66,50 @@ def test_parses_plain_base64_and_vmess_metadata():
 
     assert [node.name for node in nodes] == ["Paris", "Amsterdam 01"]
     assert [node.host for node in nodes] == ["example.com", "nl.example.com"]
+
+
+def test_parses_and_aggregates_subscription_userinfo():
+    parsed = parse_subscription_userinfo(
+        " Upload = 10.9 ; download=20; total=1000; expire=2000000000; ignored=x "
+    )
+    assert parsed is not None
+    assert parsed.upload == 10
+    assert parsed.download == 20
+    assert parsed.total == 1000
+    assert parsed.expire == 2_000_000_000
+    assert parse_subscription_userinfo("upload=-1; total=nan") is None
+
+    finite = SubscriptionUsage(
+        subscription_id="finite",
+        upload=10,
+        download=20,
+        total=1000,
+        expire=2_000_000_000,
+    )
+    unlimited = SubscriptionUsage(
+        subscription_id="unlimited",
+        upload=5,
+        download=15,
+        total=0,
+        expire=1_900_000_000,
+    )
+    aggregate = aggregate_profile_traffic([finite, unlimited, None])
+    assert aggregate.used == 50
+    assert aggregate.total is None
+    assert aggregate.remaining is None
+    assert aggregate.unlimited is True
+    assert aggregate.sources_reporting == 2
+    assert aggregate.sources_total == 3
+    assert subscription_userinfo_header(aggregate) == (
+        "upload=15; download=35; total=0; expire=1900000000"
+    )
+
+    incomplete = aggregate_profile_traffic([finite, None])
+    assert incomplete.total is None
+    assert incomplete.unlimited is False
+    assert subscription_userinfo_header(incomplete) == (
+        "upload=10; download=20; expire=2000000000"
+    )
 
 
 def test_normalizes_neon_url_for_asyncpg():
@@ -346,6 +396,108 @@ def test_profile_source_order_toggle_and_token_rotation(tmp_path, monkeypatch):
             if item["is_default"]
         )
         assert default_profile["token"] == "test-relay-token-at-least-16"
+
+    asyncio.run(with_client(app, scenario))
+
+
+def test_aggregates_profile_traffic_from_enabled_sources(tmp_path, monkeypatch):
+    app = create_app(settings_for(tmp_path))
+    usage_by_url = {
+        "https://provider.example/sub?id=secret": (
+            b"vless://one@first.example:443#First\n",
+            "upload=100; download=200; total=1000; expire=2000000000",
+        ),
+        "https://second.example/sub": (
+            b"trojan://two@second.example:443#Second\n",
+            "upload=10; download=20; total=500; expire=1900000000",
+        ),
+    }
+
+    async def fake_fetch(url, settings):
+        body, userinfo = usage_by_url[url]
+        return base64.b64encode(body), httpx.Headers(
+            {
+                "content-type": "text/plain",
+                "subscription-userinfo": userinfo,
+            }
+        )
+
+    monkeypatch.setattr(
+        "backend.app.services.subscriptions.fetch_subscription", fake_fetch
+    )
+
+    async def scenario(client: httpx.AsyncClient):
+        csrf = await login(client)
+        second = await client.post(
+            "/api/subscriptions",
+            headers={"X-CSRF-Token": csrf},
+            json={"name": "Second", "url": "https://second.example/sub"},
+        )
+        assert second.status_code == 201
+
+        subscriptions = (await client.get("/api/subscriptions")).json()
+        source_ids = {source["name"]: source["id"] for source in subscriptions}
+        for source_id in source_ids.values():
+            synced = await client.post(
+                f"/api/subscriptions/{source_id}/sync",
+                headers={"X-CSRF-Token": csrf},
+            )
+            assert synced.status_code == 200
+
+        subscriptions = (await client.get("/api/subscriptions")).json()
+        primary = next(
+            source
+            for source in subscriptions
+            if source["name"] == "Primary subscription"
+        )
+        assert primary["traffic"]["used"] == 300
+        assert primary["traffic"]["remaining"] == 700
+        assert primary["traffic"]["unlimited"] is False
+
+        created = await client.post(
+            "/api/profiles",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "name": "Traffic",
+                "subscription_ids": [
+                    source_ids["Primary subscription"],
+                    source_ids["Second"],
+                ],
+            },
+        )
+        assert created.status_code == 201
+        profile = created.json()
+        assert profile["traffic"]["upload"] == 110
+        assert profile["traffic"]["download"] == 220
+        assert profile["traffic"]["used"] == 330
+        assert profile["traffic"]["total"] == 1500
+        assert profile["traffic"]["remaining"] == 1170
+        assert profile["traffic"]["sources_reporting"] == 2
+        assert profile["traffic"]["sources_total"] == 2
+
+        public = await client.get(profile["url"])
+        assert public.status_code == 200
+        assert public.headers["subscription-userinfo"] == (
+            "upload=110; download=220; total=1500; expire=1900000000"
+        )
+
+        disabled = await client.patch(
+            f"/api/subscriptions/{source_ids['Second']}",
+            headers={"X-CSRF-Token": csrf},
+            json={"enabled": False},
+        )
+        assert disabled.status_code == 200
+        profiles = (await client.get("/api/profiles")).json()
+        profile = next(item for item in profiles if item["id"] == profile["id"])
+        assert profile["traffic"]["used"] == 300
+        assert profile["traffic"]["total"] == 1000
+        assert profile["traffic"]["sources_reporting"] == 1
+        assert profile["traffic"]["sources_total"] == 1
+
+        public = await client.get(profile["url"])
+        assert public.headers["subscription-userinfo"] == (
+            "upload=100; download=200; total=1000; expire=2000000000"
+        )
 
     asyncio.run(with_client(app, scenario))
 

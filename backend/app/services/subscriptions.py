@@ -5,6 +5,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from urllib.parse import unquote, urlsplit
 
 import httpx
@@ -12,7 +13,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import Settings
-from ..models import Node, Subscription
+from ..models import Node, Subscription, SubscriptionUsage
 from ..security import SecretBox
 
 SUPPORTED_PROTOCOLS = (
@@ -35,6 +36,7 @@ UPSTREAM_HEADERS = {
     "X-Ver-OS": "27.0",
     "X-Device-Model": "iPhone 17 Pro Max",
 }
+MAX_TRAFFIC_VALUE = 2**63 - 1
 
 
 @dataclass(frozen=True)
@@ -48,9 +50,18 @@ class ParsedNode:
 
 
 @dataclass(frozen=True)
+class ParsedSubscriptionUsage:
+    upload: int
+    download: int
+    total: int | None
+    expire: int | None
+
+
+@dataclass(frozen=True)
 class PreparedSubscriptionSync:
     subscription_id: str
     nodes: tuple[ParsedNode, ...]
+    usage: ParsedSubscriptionUsage | None
     synced_at: datetime
 
 
@@ -123,6 +134,40 @@ def parse_subscription(body: bytes) -> list[ParsedNode]:
     return nodes
 
 
+def _parse_traffic_value(value: str) -> int | None:
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation:
+        return None
+    if not parsed.is_finite() or parsed < 0:
+        return None
+    result = int(parsed)
+    return result if result <= MAX_TRAFFIC_VALUE else None
+
+
+def parse_subscription_userinfo(value: str | None) -> ParsedSubscriptionUsage | None:
+    if not value:
+        return None
+    parsed_fields: dict[str, int] = {}
+    for raw_field in value[:4096].split(";"):
+        name, separator, raw_value = raw_field.partition("=")
+        name = name.strip().lower()
+        if not separator or name not in {"upload", "download", "total", "expire"}:
+            continue
+        parsed = _parse_traffic_value(raw_value.strip())
+        if parsed is not None:
+            parsed_fields[name] = parsed
+    if not parsed_fields:
+        return None
+    expire = parsed_fields.get("expire")
+    return ParsedSubscriptionUsage(
+        upload=parsed_fields.get("upload", 0),
+        download=parsed_fields.get("download", 0),
+        total=parsed_fields.get("total"),
+        expire=expire if expire else None,
+    )
+
+
 def encode_subscription(uris: list[str]) -> bytes:
     content = "\n".join(uris) + ("\n" if uris else "")
     return base64.b64encode(content.encode("utf-8"))
@@ -150,13 +195,14 @@ async def prepare_subscription_sync(
     secret_box: SecretBox,
 ) -> PreparedSubscriptionSync:
     url = secret_box.decrypt(subscription.url_ciphertext)
-    body, _ = await fetch_subscription(url, settings)
+    body, headers = await fetch_subscription(url, settings)
     parsed_nodes = parse_subscription(body)
     if not parsed_nodes:
         raise ValueError("Upstream response does not contain supported nodes")
     return PreparedSubscriptionSync(
         subscription_id=subscription.id,
         nodes=tuple(parsed_nodes),
+        usage=parse_subscription_userinfo(headers.get("subscription-userinfo")),
         synced_at=datetime.now(UTC),
     )
 
@@ -167,9 +213,9 @@ async def persist_subscription_syncs(
     errors: dict[str, Exception],
     secret_box: SecretBox,
 ) -> None:
-    subscription_ids = {
-        prepared.subscription_id for prepared in prepared_syncs
-    } | set(errors)
+    subscription_ids = {prepared.subscription_id for prepared in prepared_syncs} | set(
+        errors
+    )
     if not subscription_ids:
         return
 
@@ -193,6 +239,16 @@ async def persist_subscription_syncs(
         ).all()
         for node in existing_nodes:
             existing_by_subscription[node.subscription_id][node.id] = node
+    usage_by_subscription = {
+        usage.subscription_id: usage
+        for usage in (
+            await session.scalars(
+                select(SubscriptionUsage).where(
+                    SubscriptionUsage.subscription_id.in_(successful_ids)
+                )
+            )
+        ).all()
+    }
 
     stale_node_ids: set[str] = set()
     for prepared in prepared_syncs:
@@ -243,6 +299,28 @@ async def persist_subscription_syncs(
         subscription.node_count = len(prepared.nodes)
         subscription.last_error = None
         subscription.last_sync_at = prepared.synced_at
+
+        usage = usage_by_subscription.get(prepared.subscription_id)
+        if prepared.usage is None:
+            if usage is not None:
+                await session.delete(usage)
+        elif usage is None:
+            session.add(
+                SubscriptionUsage(
+                    subscription_id=prepared.subscription_id,
+                    upload=prepared.usage.upload,
+                    download=prepared.usage.download,
+                    total=prepared.usage.total,
+                    expire=prepared.usage.expire,
+                    updated_at=prepared.synced_at,
+                )
+            )
+        else:
+            usage.upload = prepared.usage.upload
+            usage.download = prepared.usage.download
+            usage.total = prepared.usage.total
+            usage.expire = prepared.usage.expire
+            usage.updated_at = prepared.synced_at
 
     if stale_node_ids:
         await session.execute(delete(Node).where(Node.id.in_(stale_node_ids)))

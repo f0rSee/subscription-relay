@@ -38,6 +38,8 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
+import { TrafficUsageView } from "@/components/traffic-usage"
+import { formatBytes } from "@/lib/format-bytes"
 import {
   CopyIcon,
   GripVerticalIcon,
@@ -153,7 +155,10 @@ function ProfileSourcesEditor({
                     )}
                   </div>
                   <p className="truncate text-xs text-muted-foreground">
-                    {source.subscription.node_count} серверов · приоритет в профиле {index + 1}
+                    {source.subscription.traffic
+                      ? `${formatBytes(source.subscription.traffic.used)} использовано`
+                      : `${source.subscription.node_count} серверов`}
+                    {` · приоритет в профиле ${index + 1}`}
                   </p>
                 </div>
                 <Switch
@@ -504,6 +509,10 @@ export function ProfilesView({
                       }
                     />
                   </div>
+                  <TrafficUsageView
+                    traffic={profile.traffic}
+                    className="mt-4 border-t pt-3"
+                  />
                   <div className="mt-4 flex flex-wrap items-center gap-2">
                     <Button
                       type="button"

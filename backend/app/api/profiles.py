@@ -21,7 +21,13 @@ from ..schemas import (
     ProfileUpdate,
     UpdatedResponse,
 )
+from ..services.presenters import profile_traffic_response
 from ..services.profiles import profile_nodes
+from ..services.traffic import (
+    ProfileTraffic,
+    profile_traffic_summaries,
+    profile_traffic_summary,
+)
 
 router = APIRouter(prefix="/profiles", tags=["profiles"])
 
@@ -48,6 +54,7 @@ async def _validate_source_ids(
 def _profile_response(
     profile: Profile,
     source_ids: list[str],
+    traffic: ProfileTraffic,
     *,
     relay_token: str,
 ) -> ProfileResponse:
@@ -58,6 +65,7 @@ def _profile_response(
         enabled=profile.enabled,
         is_default=secrets.compare_digest(profile.token, relay_token),
         subscription_ids=source_ids,
+        traffic=profile_traffic_response(traffic),
         url=f"/s/{profile.token}",
         created_at=profile.created_at,
     )
@@ -82,10 +90,15 @@ async def list_profiles(
     source_ids_by_profile: dict[str, list[str]] = {}
     for profile_id, subscription_id in links:
         source_ids_by_profile.setdefault(profile_id, []).append(subscription_id)
+    traffic_by_profile = await profile_traffic_summaries(
+        session,
+        (profile.id for profile in profiles),
+    )
     return [
         _profile_response(
             profile,
             source_ids_by_profile.get(profile.id, []),
+            traffic_by_profile[profile.id],
             relay_token=settings.relay_token,
         )
         for profile in profiles
@@ -126,9 +139,11 @@ async def create_profile(
             )
         )
     await session.commit()
+    traffic = await profile_traffic_summary(session, profile.id)
     return _profile_response(
         profile,
         source_ids,
+        traffic,
         relay_token=settings.relay_token,
     )
 
@@ -181,9 +196,11 @@ async def update_profile(
             )
         ).all()
     )
+    traffic = await profile_traffic_summary(session, profile.id)
     return _profile_response(
         profile,
         source_ids,
+        traffic,
         relay_token=settings.relay_token,
     )
 

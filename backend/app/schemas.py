@@ -64,6 +64,22 @@ class DashboardResponse(BaseModel):
     persistent_storage: bool
 
 
+class TrafficUsageResponse(BaseModel):
+    upload: int
+    download: int
+    used: int
+    total: int | None
+    remaining: int | None
+    unlimited: bool
+    expire_at: datetime | None
+    updated_at: datetime | None
+
+
+class ProfileTrafficResponse(TrafficUsageResponse):
+    sources_reporting: int
+    sources_total: int
+
+
 class SubscriptionResponse(BaseModel):
     id: str
     name: str
@@ -74,6 +90,7 @@ class SubscriptionResponse(BaseModel):
     node_count: int
     last_error: str | None
     last_sync_at: datetime | None
+    traffic: TrafficUsageResponse | None
     created_at: datetime
     updated_at: datetime
 
@@ -90,6 +107,7 @@ class ProfileResponse(BaseModel):
     enabled: bool
     is_default: bool
     subscription_ids: list[str]
+    traffic: ProfileTrafficResponse
     url: str
     created_at: datetime | None = None
 

@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Response, status
 from sqlalchemy import func, select
 
 from ..dependencies import SecretBoxDep, SessionDep, SettingsDep
-from ..models import Profile, ProfileSubscription, Subscription
+from ..models import Profile, ProfileSubscription, Subscription, SubscriptionUsage
 from ..schemas import (
     SubscriptionCreate,
     SubscriptionResponse,
@@ -33,15 +33,23 @@ async def list_subscriptions(
     session: SessionDep,
     secret_box: SecretBoxDep,
 ) -> list[SubscriptionResponse]:
-    subscriptions = (
-        await session.scalars(
-            select(Subscription).order_by(
+    rows = (
+        await session.execute(
+            select(Subscription, SubscriptionUsage)
+            .outerjoin(
+                SubscriptionUsage,
+                SubscriptionUsage.subscription_id == Subscription.id,
+            )
+            .order_by(
                 Subscription.priority,
                 Subscription.created_at,
             )
         )
     ).all()
-    return [subscription_response(item, secret_box) for item in subscriptions]
+    return [
+        subscription_response(subscription, usage, secret_box)
+        for subscription, usage in rows
+    ]
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -81,7 +89,7 @@ async def create_subscription(
             )
         )
     await session.commit()
-    return subscription_response(subscription, secret_box)
+    return subscription_response(subscription, None, secret_box)
 
 
 @router.patch("/{subscription_id}")
@@ -96,6 +104,7 @@ async def update_subscription(
     if subscription is None:
         raise HTTPException(status_code=404, detail="Subscription not found")
 
+    usage = await session.get(SubscriptionUsage, subscription_id)
     updates = payload.model_dump(exclude_unset=True, exclude_none=True)
     if "url" in updates:
         url = updates.pop("url")
@@ -107,10 +116,13 @@ async def update_subscription(
         )
         subscription.url_ciphertext = secret_box.encrypt(url)
         subscription.status = "never"
+        if usage is not None:
+            await session.delete(usage)
+            usage = None
     for key, value in updates.items():
         setattr(subscription, key, value)
     await session.commit()
-    return subscription_response(subscription, secret_box)
+    return subscription_response(subscription, usage, secret_box)
 
 
 @router.delete("/{subscription_id}", status_code=status.HTTP_204_NO_CONTENT)

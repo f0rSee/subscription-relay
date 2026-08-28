@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -46,6 +46,28 @@ class Subscription(Base):
     profile_links: Mapped[list[ProfileSubscription]] = relationship(
         back_populates="subscription", cascade="all, delete-orphan"
     )
+    usage: Mapped[SubscriptionUsage | None] = relationship(
+        back_populates="subscription",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+
+class SubscriptionUsage(Base):
+    __tablename__ = "subscription_usage"
+
+    subscription_id: Mapped[str] = mapped_column(
+        ForeignKey("subscriptions.id", ondelete="CASCADE"), primary_key=True
+    )
+    upload: Mapped[int] = mapped_column(BigInteger, default=0)
+    download: Mapped[int] = mapped_column(BigInteger, default=0)
+    total: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    expire: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+    subscription: Mapped[Subscription] = relationship(back_populates="usage")
 
 
 class Node(Base):

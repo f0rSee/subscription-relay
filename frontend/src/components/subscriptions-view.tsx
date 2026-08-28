@@ -31,6 +31,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
+import { TrafficUsageView } from "@/components/traffic-usage"
 import { useTable } from "@tanstack/react-table"
 import type { ColumnDef, PaginationState, SortingState } from "@tanstack/react-table"
 import {
@@ -204,6 +205,19 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
           <span className="font-medium tabular-nums">{row.original.node_count}</span>
         ),
         size: 90,
+        enableSorting: true,
+      },
+      {
+        id: "traffic",
+        accessorFn: (subscription) => subscription.traffic?.used ?? -1,
+        header: "Трафик",
+        cell: ({ row }) => (
+          <TrafficUsageView
+            traffic={row.original.traffic}
+            className="min-w-64"
+          />
+        ),
+        size: 280,
         enableSorting: true,
       },
       {

@@ -20,6 +20,22 @@ export interface DashboardSummary {
   persistent_storage: boolean
 }
 
+export interface TrafficUsage {
+  upload: number
+  download: number
+  used: number
+  total: number | null
+  remaining: number | null
+  unlimited: boolean
+  expire_at: string | null
+  updated_at: string | null
+}
+
+export interface ProfileTraffic extends TrafficUsage {
+  sources_reporting: number
+  sources_total: number
+}
+
 export interface Subscription {
   id: string
   name: string
@@ -30,6 +46,7 @@ export interface Subscription {
   node_count: number
   last_error: string | null
   last_sync_at: string | null
+  traffic: TrafficUsage | null
   created_at: string
   updated_at: string
 }
@@ -41,6 +58,7 @@ export interface Profile {
   enabled: boolean
   is_default: boolean
   subscription_ids: string[]
+  traffic: ProfileTraffic
   url: string
   created_at?: string
 }

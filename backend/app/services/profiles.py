@@ -25,6 +25,7 @@ from .subscriptions import (
     persist_subscription_syncs,
     prepare_subscription_sync,
 )
+from .traffic import profile_traffic_summary, subscription_userinfo_header
 
 ProfileNodeRow: TypeAlias = tuple[
     Node,
@@ -194,6 +195,7 @@ async def render_profile(
     )
     async with runtime.database.sessions() as session:
         rows = await profile_nodes(session, profile.id)
+        traffic = await profile_traffic_summary(session, profile.id)
         uris: list[str] = []
         seen: set[str] = set()
         for node, _, _, _ in rows:
@@ -235,12 +237,16 @@ async def render_profile(
         request_logging_enabled=relay_settings.request_logging_enabled,
         device_tracking_enabled=relay_settings.device_tracking_enabled,
     )
+    headers = {
+        "Cache-Control": "no-store",
+        "Profile-Title": profile.name,
+        "Profile-Update-Interval": "15",
+    }
+    userinfo = subscription_userinfo_header(traffic)
+    if userinfo:
+        headers["subscription-userinfo"] = userinfo
     return Response(
         content=encode_subscription(uris),
         media_type="text/plain",
-        headers={
-            "Cache-Control": "no-store",
-            "Profile-Title": profile.name,
-            "Profile-Update-Interval": "15",
-        },
+        headers=headers,
     )
