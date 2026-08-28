@@ -26,7 +26,7 @@ class SubscriptionUpdate(BaseModel):
 
 class ProfileCreate(BaseModel):
     name: str = Field(min_length=1, max_length=160)
-    subscription_ids: list[str] = Field(default_factory=list)
+    subscription_ids: list[str] | None = None
 
 
 class ProfileUpdate(BaseModel):
@@ -88,6 +88,7 @@ class ProfileResponse(BaseModel):
     name: str
     token: str
     enabled: bool
+    is_default: bool
     subscription_ids: list[str]
     url: str
     created_at: datetime | None = None

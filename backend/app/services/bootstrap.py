@@ -14,6 +14,7 @@ async def bootstrap(runtime: AppRuntime) -> None:
         profile = await session.scalar(
             select(Profile).where(Profile.token == runtime.settings.relay_token)
         )
+        profile_created = profile is None
         if profile is None:
             profile = Profile(name="Default", token=runtime.settings.relay_token)
             session.add(profile)
@@ -39,28 +40,18 @@ async def bootstrap(runtime: AppRuntime) -> None:
                     position=0,
                 )
             )
-        else:
-            linked_ids = set(
-                (
-                    await session.scalars(
-                        select(ProfileSubscription.subscription_id).where(
-                            ProfileSubscription.profile_id == profile.id
-                        )
-                    )
-                ).all()
-            )
+        elif profile_created:
             subscriptions = (
                 await session.scalars(
                     select(Subscription).order_by(Subscription.priority)
                 )
             ).all()
             for position, subscription in enumerate(subscriptions):
-                if subscription.id not in linked_ids:
-                    session.add(
-                        ProfileSubscription(
-                            profile_id=profile.id,
-                            subscription_id=subscription.id,
-                            position=position,
-                        )
+                session.add(
+                    ProfileSubscription(
+                        profile_id=profile.id,
+                        subscription_id=subscription.id,
+                        position=position,
                     )
+                )
         await session.commit()

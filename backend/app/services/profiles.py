@@ -30,6 +30,7 @@ ProfileNodeRow: TypeAlias = tuple[
     Node,
     Subscription,
     ProfileNodePreference | None,
+    ProfileSubscription,
 ]
 
 
@@ -51,7 +52,12 @@ async def profile_nodes(
     )
     rows = (
         await session.execute(
-            select(Node, Subscription, ProfileNodePreference)
+            select(
+                Node,
+                Subscription,
+                ProfileNodePreference,
+                ProfileSubscription,
+            )
             .join(Subscription, Subscription.id == Node.subscription_id)
             .join(
                 ProfileSubscription,
@@ -66,9 +72,10 @@ async def profile_nodes(
     ).all()
 
     def sort_key(row: ProfileNodeRow) -> tuple:
-        node, subscription, preference = row
+        node, subscription, preference, profile_subscription = row
         explicit = preference.position if preference else None
         return (
+            profile_subscription.position,
             explicit if explicit is not None else 1_000_000,
             subscription.priority,
             node.source_position,
@@ -103,7 +110,10 @@ async def refresh_profile_sources(
                         ProfileSubscription.profile_id == profile_id,
                         Subscription.enabled.is_(True),
                     )
-                    .order_by(Subscription.priority)
+                    .order_by(
+                        ProfileSubscription.position,
+                        Subscription.priority,
+                    )
                 )
             ).all()
 
@@ -186,7 +196,7 @@ async def render_profile(
         rows = await profile_nodes(session, profile.id)
         uris: list[str] = []
         seen: set[str] = set()
-        for node, _, _ in rows:
+        for node, _, _, _ in rows:
             if relay_settings.deduplicate_servers and node.fingerprint in seen:
                 continue
             seen.add(node.fingerprint)

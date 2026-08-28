@@ -64,16 +64,18 @@ async def create_subscription(
     session.add(subscription)
     await session.flush()
 
-    profiles = (await session.scalars(select(Profile))).all()
-    for profile in profiles:
+    default_profile = await session.scalar(
+        select(Profile).where(Profile.token == settings.relay_token)
+    )
+    if default_profile is not None:
         position = await session.scalar(
             select(func.count())
             .select_from(ProfileSubscription)
-            .where(ProfileSubscription.profile_id == profile.id)
+            .where(ProfileSubscription.profile_id == default_profile.id)
         )
         session.add(
             ProfileSubscription(
-                profile_id=profile.id,
+                profile_id=default_profile.id,
                 subscription_id=subscription.id,
                 position=position or 0,
             )

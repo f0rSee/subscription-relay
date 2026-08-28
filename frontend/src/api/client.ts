@@ -4,6 +4,7 @@ import type {
   DashboardSummary,
   Profile,
   ProfileInput,
+  ProfileUpdateInput,
   ProfileNode,
   RelaySettings,
   RelaySettingsInput,
@@ -91,10 +92,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input),
     }),
-  updateProfile: (
-    id: string,
-    input: Partial<ProfileInput> & { enabled?: boolean; rotate_token?: boolean },
-  ) =>
+  updateProfile: (id: string, input: ProfileUpdateInput) =>
     request<Profile>(`/api/profiles/${id}`, {
       method: "PATCH",
       body: JSON.stringify(input),

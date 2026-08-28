@@ -39,6 +39,7 @@ export interface Profile {
   name: string
   token: string
   enabled: boolean
+  is_default: boolean
   subscription_ids: string[]
   url: string
   created_at?: string
@@ -99,6 +100,13 @@ export interface SubscriptionInput {
 export interface ProfileInput {
   name: string
   subscription_ids: string[]
+}
+
+export interface ProfileUpdateInput {
+  name?: string
+  enabled?: boolean
+  subscription_ids?: string[]
+  rotate_token?: boolean
 }
 
 export type RelaySettingsInput = Partial<

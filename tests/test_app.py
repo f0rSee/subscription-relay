@@ -200,6 +200,188 @@ def test_combines_sources_and_persists_profile_order(tmp_path, monkeypatch):
     asyncio.run(with_client(app, scenario))
 
 
+def test_profile_source_order_toggle_and_token_rotation(tmp_path, monkeypatch):
+    app = create_app(settings_for(tmp_path))
+    upstream_by_url = {
+        "https://provider.example/sub?id=secret": base64.b64encode(
+            b"vless://a1@first.example:443#First-1\n"
+            b"vless://a2@first.example:443#First-2\n"
+        ),
+        "https://second.example/sub": base64.b64encode(
+            b"trojan://b1@second.example:443#Second-1\n"
+            b"trojan://b2@second.example:443#Second-2\n"
+        ),
+    }
+
+    async def fake_fetch(url, settings):
+        return upstream_by_url[url], httpx.Headers({"content-type": "text/plain"})
+
+    monkeypatch.setattr(
+        "backend.app.services.subscriptions.fetch_subscription", fake_fetch
+    )
+
+    async def scenario(client: httpx.AsyncClient):
+        csrf = await login(client)
+        second = await client.post(
+            "/api/subscriptions",
+            headers={"X-CSRF-Token": csrf},
+            json={"name": "Second", "url": "https://second.example/sub"},
+        )
+        assert second.status_code == 201
+
+        subscriptions = (await client.get("/api/subscriptions")).json()
+        source_ids = {source["name"]: source["id"] for source in subscriptions}
+        for source_id in source_ids.values():
+            synced = await client.post(
+                f"/api/subscriptions/{source_id}/sync",
+                headers={"X-CSRF-Token": csrf},
+            )
+            assert synced.status_code == 200
+
+        created = await client.post(
+            "/api/profiles",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "name": "Ordered",
+                "subscription_ids": [
+                    source_ids["Second"],
+                    source_ids["Primary subscription"],
+                ],
+            },
+        )
+        assert created.status_code == 201
+        profile = created.json()
+        assert profile["is_default"] is False
+
+        nodes = (await client.get(f"/api/profiles/{profile['id']}/nodes")).json()
+        assert [node["name"] for node in nodes] == [
+            "Second-1",
+            "Second-2",
+            "First-1",
+            "First-2",
+        ]
+        public = await client.get(profile["url"])
+        assert public.status_code == 200
+        assert [
+            uri.split("#", 1)[1]
+            for uri in base64.b64decode(public.content).decode().splitlines()
+        ] == [
+            "Second-1",
+            "Second-2",
+            "First-1",
+            "First-2",
+        ]
+
+        updated = await client.patch(
+            f"/api/profiles/{profile['id']}",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "name": "First only",
+                "subscription_ids": [source_ids["Primary subscription"]],
+            },
+        )
+        assert updated.status_code == 200
+        assert updated.json()["subscription_ids"] == [
+            source_ids["Primary subscription"]
+        ]
+        nodes = (await client.get(f"/api/profiles/{profile['id']}/nodes")).json()
+        assert [node["name"] for node in nodes] == ["First-1", "First-2"]
+
+        old_url = profile["url"]
+        rotated = await client.patch(
+            f"/api/profiles/{profile['id']}",
+            headers={"X-CSRF-Token": csrf},
+            json={"rotate_token": True},
+        )
+        assert rotated.status_code == 200
+        assert rotated.json()["url"] != old_url
+        assert (await client.get(old_url)).status_code == 404
+        assert (await client.get(rotated.json()["url"])).status_code == 200
+
+        emptied = await client.patch(
+            f"/api/profiles/{profile['id']}",
+            headers={"X-CSRF-Token": csrf},
+            json={"subscription_ids": []},
+        )
+        assert emptied.status_code == 200
+        assert emptied.json()["subscription_ids"] == []
+        assert (await client.get(rotated.json()["url"])).status_code == 502
+
+        empty_profile = await client.post(
+            "/api/profiles",
+            headers={"X-CSRF-Token": csrf},
+            json={"name": "Empty", "subscription_ids": []},
+        )
+        assert empty_profile.status_code == 201
+        assert empty_profile.json()["subscription_ids"] == []
+
+        third_source = await client.post(
+            "/api/subscriptions",
+            headers={"X-CSRF-Token": csrf},
+            json={"name": "Third", "url": "https://third.example/sub"},
+        )
+        assert third_source.status_code == 201
+        empty_after_new_source = next(
+            item
+            for item in (await client.get("/api/profiles")).json()
+            if item["id"] == empty_profile.json()["id"]
+        )
+        assert empty_after_new_source["subscription_ids"] == []
+
+        duplicate_sources = await client.patch(
+            f"/api/profiles/{profile['id']}",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "subscription_ids": [
+                    source_ids["Second"],
+                    source_ids["Second"],
+                ]
+            },
+        )
+        assert duplicate_sources.status_code == 422
+
+        default_profile = next(
+            item
+            for item in (await client.get("/api/profiles")).json()
+            if item["is_default"]
+        )
+        assert default_profile["token"] == "test-relay-token-at-least-16"
+
+    asyncio.run(with_client(app, scenario))
+
+
+def test_default_profile_source_selection_survives_restart(tmp_path):
+    settings = settings_for(tmp_path)
+
+    async def disable_all_sources(client: httpx.AsyncClient):
+        csrf = await login(client)
+        default_profile = next(
+            item
+            for item in (await client.get("/api/profiles")).json()
+            if item["is_default"]
+        )
+        updated = await client.patch(
+            f"/api/profiles/{default_profile['id']}",
+            headers={"X-CSRF-Token": csrf},
+            json={"subscription_ids": []},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["subscription_ids"] == []
+
+    asyncio.run(with_client(create_app(settings), disable_all_sources))
+
+    async def verify_sources_stay_disabled(client: httpx.AsyncClient):
+        await login(client)
+        default_profile = next(
+            item
+            for item in (await client.get("/api/profiles")).json()
+            if item["is_default"]
+        )
+        assert default_profile["subscription_ids"] == []
+
+    asyncio.run(with_client(create_app(settings), verify_sources_stay_disabled))
+
+
 def test_refreshes_all_sources_concurrently_before_each_response(
     tmp_path,
     monkeypatch,

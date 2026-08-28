@@ -30,6 +30,8 @@ async def _validate_source_ids(
     session: AsyncSession,
     source_ids: list[str],
 ) -> None:
+    if len(source_ids) != len(set(source_ids)):
+        raise HTTPException(status_code=422, detail="Subscription ids must be unique")
     if not source_ids:
         return
     existing = set(
@@ -46,12 +48,15 @@ async def _validate_source_ids(
 def _profile_response(
     profile: Profile,
     source_ids: list[str],
+    *,
+    relay_token: str,
 ) -> ProfileResponse:
     return ProfileResponse(
         id=profile.id,
         name=profile.name,
         token=profile.token,
         enabled=profile.enabled,
+        is_default=secrets.compare_digest(profile.token, relay_token),
         subscription_ids=source_ids,
         url=f"/s/{profile.token}",
         created_at=profile.created_at,
@@ -59,7 +64,10 @@ def _profile_response(
 
 
 @router.get("")
-async def list_profiles(session: SessionDep) -> list[ProfileResponse]:
+async def list_profiles(
+    session: SessionDep,
+    settings: SettingsDep,
+) -> list[ProfileResponse]:
     profiles = (
         await session.scalars(select(Profile).order_by(Profile.created_at))
     ).all()
@@ -75,7 +83,11 @@ async def list_profiles(session: SessionDep) -> list[ProfileResponse]:
     for profile_id, subscription_id in links:
         source_ids_by_profile.setdefault(profile_id, []).append(subscription_id)
     return [
-        _profile_response(profile, source_ids_by_profile.get(profile.id, []))
+        _profile_response(
+            profile,
+            source_ids_by_profile.get(profile.id, []),
+            relay_token=settings.relay_token,
+        )
         for profile in profiles
     ]
 
@@ -84,9 +96,21 @@ async def list_profiles(session: SessionDep) -> list[ProfileResponse]:
 async def create_profile(
     payload: ProfileCreate,
     session: SessionDep,
+    settings: SettingsDep,
 ) -> ProfileResponse:
-    source_ids = payload.subscription_ids or list(
-        (await session.scalars(select(Subscription.id))).all()
+    source_ids = (
+        payload.subscription_ids
+        if payload.subscription_ids is not None
+        else list(
+            (
+                await session.scalars(
+                    select(Subscription.id).order_by(
+                        Subscription.priority,
+                        Subscription.created_at,
+                    )
+                )
+            ).all()
+        )
     )
     await _validate_source_ids(session, source_ids)
 
@@ -102,7 +126,11 @@ async def create_profile(
             )
         )
     await session.commit()
-    return _profile_response(profile, source_ids)
+    return _profile_response(
+        profile,
+        source_ids,
+        relay_token=settings.relay_token,
+    )
 
 
 @router.patch("/{profile_id}")
@@ -153,7 +181,11 @@ async def update_profile(
             )
         ).all()
     )
-    return _profile_response(profile, source_ids)
+    return _profile_response(
+        profile,
+        source_ids,
+        relay_token=settings.relay_token,
+    )
 
 
 @router.delete("/{profile_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -185,7 +217,7 @@ async def list_profile_nodes(
     rows = await profile_nodes(session, profile_id)
     seen: set[str] = set()
     result: list[ProfileNodeResponse] = []
-    for node, subscription, _ in rows:
+    for node, subscription, _, _ in rows:
         duplicate = node.fingerprint in seen
         seen.add(node.fingerprint)
         result.append(
@@ -213,7 +245,7 @@ async def update_node_order(
     if await session.get(Profile, profile_id) is None:
         raise HTTPException(status_code=404, detail="Profile not found")
     valid_rows = await profile_nodes(session, profile_id)
-    valid_ids = {node.id for node, _, _ in valid_rows}
+    valid_ids = {node.id for node, _, _, _ in valid_rows}
     if not set(payload.node_ids).issubset(valid_ids):
         raise HTTPException(status_code=422, detail="Unknown node in order")
 

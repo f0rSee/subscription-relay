@@ -7,6 +7,7 @@ import type {
   Profile,
   ProfileInput,
   ProfileNode,
+  ProfileUpdateInput,
   RelaySettings,
   RelaySettingsInput,
   RequestLog,
@@ -258,10 +259,18 @@ export default function App() {
     await loadDashboard()
   }
 
-  async function toggleProfile(profile: Profile, enabled: boolean) {
-    await api.updateProfile(profile.id, { enabled })
-    toast.success(enabled ? "Профиль включён" : "Профиль выключен")
-    await loadDashboard()
+  async function updateProfile(
+    profile: Profile,
+    input: ProfileUpdateInput,
+  ): Promise<Profile> {
+    const updated = await api.updateProfile(profile.id, input)
+    setProfiles((current) =>
+      current.map((item) => (item.id === updated.id ? updated : item)),
+    )
+    if (selectedProfileId === profile.id) {
+      setNodes(await api.profileNodes(profile.id))
+    }
+    return updated
   }
 
   async function deleteProfile(profile: Profile) {
@@ -388,8 +397,11 @@ export default function App() {
               <ProfilesView
                 profiles={profiles}
                 subscriptions={subscriptions}
+                loading={loadingDashboard}
+                error={subscriptionsError}
+                onRetry={() => void loadDashboard()}
                 onCreate={createProfile}
-                onToggle={toggleProfile}
+                onUpdate={updateProfile}
                 onDelete={deleteProfile}
               />
             )}
