@@ -136,3 +136,14 @@ export type RelaySettingsInput = Partial<
     | "auto_refresh_enabled"
   >
 >
+
+export interface BatchSyncResponse {
+  total: number
+  healthy: number
+  errors: number
+  node_count: number
+}
+
+export interface DeletedCountResponse {
+  deleted: number
+}

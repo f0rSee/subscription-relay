@@ -49,6 +49,7 @@ interface SubscriptionsViewProps {
   onCreate: (input: SubscriptionInput) => Promise<void>
   onToggle: (subscription: Subscription, enabled: boolean) => Promise<void>
   onSync: (subscription: Subscription) => Promise<void>
+  onSyncAll?: () => Promise<void>
   onDelete: (subscription: Subscription) => Promise<void>
 }
 
@@ -144,13 +145,24 @@ function AddSubscriptionDialog({
 }
 
 export function SubscriptionsView(props: SubscriptionsViewProps) {
-  const { subscriptions, loading, error, onRetry, onCreate, onToggle, onSync, onDelete } = props
+  const {
+    subscriptions,
+    loading,
+    error,
+    onRetry,
+    onCreate,
+    onToggle,
+    onSync,
+    onSyncAll,
+    onDelete,
+  } = props
   const [pagination, setPagination] = useState<PaginationState>({
     pageIndex: 0,
     pageSize: 10,
   })
   const [sorting, setSorting] = useState<SortingState>([])
   const [pendingId, setPendingId] = useState("")
+  const [syncingAll, setSyncingAll] = useState(false)
 
   async function run(id: string, action: () => Promise<void>) {
     setPendingId(id)
@@ -306,7 +318,31 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
             Сервис забирает данные по URL и обновляет список серверов для профилей.
           </FrameDescription>
         </div>
-        <AddSubscriptionDialog onCreate={onCreate} />
+        <div className="flex items-center gap-2">
+          {onSyncAll && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={syncingAll || loading || subscriptions.length === 0}
+              onClick={async () => {
+                setSyncingAll(true)
+                try {
+                  await onSyncAll()
+                } finally {
+                  setSyncingAll(false)
+                }
+              }}
+            >
+              <RefreshCwIcon
+                className={syncingAll ? "size-4 animate-spin" : "size-4"}
+                aria-hidden="true"
+              />
+              {syncingAll ? "Синхронизирую…" : "Синхронизировать все"}
+            </Button>
+          )}
+          <AddSubscriptionDialog onCreate={onCreate} />
+        </div>
       </FrameHeader>
       <FramePanel className="p-2!">
         {error && (

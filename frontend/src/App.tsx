@@ -247,6 +247,15 @@ export default function App() {
     if (selectedProfileId) setNodes(await api.profileNodes(selectedProfileId))
   }
 
+  async function syncAllSubscriptions() {
+    const result = await api.syncAllSubscriptions()
+    toast.success("Источники синхронизированы", {
+      description: `Успешно: ${result.healthy} из ${result.total}, серверов: ${result.node_count}`,
+    })
+    await loadDashboard()
+    if (selectedProfileId) setNodes(await api.profileNodes(selectedProfileId))
+  }
+
   async function deleteSubscription(subscription: Subscription) {
     await api.deleteSubscription(subscription.id)
     toast.success(`Источник «${subscription.name}» удалён`)
@@ -285,6 +294,28 @@ export default function App() {
       orderedNodes.map((node) => node.id),
     )
     toast.success("Порядок серверов сохранён")
+  }
+
+  async function clearRequestLogs() {
+    try {
+      const res = await api.clearRequestLogs()
+      setRequestLogs([])
+      toast.success(`История запросов очищена (${res.deleted} записей)`)
+      await loadDashboard()
+    } catch (reason) {
+      toast.error(errorMessage(reason))
+    }
+  }
+
+  async function clearDevices() {
+    try {
+      const res = await api.clearDevices()
+      setDevices([])
+      toast.success(`Список устройств очищен (${res.deleted} устройств)`)
+      await loadDashboard()
+    } catch (reason) {
+      toast.error(errorMessage(reason))
+    }
   }
 
   async function updateRelaySettings(input: RelaySettingsInput) {
@@ -390,6 +421,7 @@ export default function App() {
                 onCreate={createSubscription}
                 onToggle={toggleSubscription}
                 onSync={syncSubscription}
+                onSyncAll={syncAllSubscriptions}
                 onDelete={deleteSubscription}
               />
             )}
@@ -423,6 +455,7 @@ export default function App() {
                 loading={loadingLogs}
                 error={logsError}
                 onRefresh={() => void loadLogs()}
+                onClear={clearRequestLogs}
               />
             )}
             {activeView === "devices" && (
@@ -431,6 +464,7 @@ export default function App() {
                 loading={loadingDevices}
                 error={devicesError}
                 onRefresh={() => void loadDevices()}
+                onClear={clearDevices}
               />
             )}
             {activeView === "settings" && (
