@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Query
-from sqlalchemy import select
+from fastapi import APIRouter, HTTPException, Query, Response, status
+from sqlalchemy import delete, select, update
 
 from ..dependencies import SessionDep
 from ..models import ClientDevice, RequestLog
-from ..schemas import ClientDeviceResponse, RequestLogResponse
+from ..schemas import (
+    ClientDeviceResponse,
+    DeletedCountResponse,
+    RequestLogResponse,
+)
 
 router = APIRouter(tags=["observability"])
 
@@ -65,3 +69,38 @@ async def list_devices(
         )
         for device in devices
     ]
+
+
+@router.delete("/request-logs")
+async def clear_request_logs(session: SessionDep) -> DeletedCountResponse:
+    result = await session.execute(delete(RequestLog))
+    await session.commit()
+    count = result.rowcount if result.rowcount is not None else 0
+    return DeletedCountResponse(deleted=count)
+
+
+@router.delete("/devices")
+async def clear_devices(session: SessionDep) -> DeletedCountResponse:
+    await session.execute(update(RequestLog).values(device_id=None))
+    result = await session.execute(delete(ClientDevice))
+    await session.commit()
+    count = result.rowcount if result.rowcount is not None else 0
+    return DeletedCountResponse(deleted=count)
+
+
+@router.delete("/devices/{device_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_device(
+    device_id: str,
+    session: SessionDep,
+) -> Response:
+    device = await session.get(ClientDevice, device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+    await session.execute(
+        update(RequestLog)
+        .where(RequestLog.device_id == device_id)
+        .values(device_id=None)
+    )
+    await session.delete(device)
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
