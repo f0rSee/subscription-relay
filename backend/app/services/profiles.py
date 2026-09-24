@@ -96,9 +96,9 @@ async def refresh_profile_sources(
         return
 
     requested_at = datetime.now(UTC)
-    # Only one request schedules refreshes at a time. A request that waited for
-    # a newer completed refresh can reuse it instead of creating a stampede.
-    async with runtime.refresh_lock:
+    # Synchronize refreshes per profile so requests to different profiles
+    # run concurrently without head-of-line blocking.
+    async with runtime.profile_locks.acquire(profile_id):
         async with runtime.database.sessions() as session:
             subscriptions = (
                 await session.scalars(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from urllib.parse import urlsplit
 
 import httpx
@@ -9,13 +10,19 @@ from sqlalchemy import func, select
 from ..dependencies import SecretBoxDep, SessionDep, SettingsDep
 from ..models import Profile, ProfileSubscription, Subscription, SubscriptionUsage
 from ..schemas import (
+    BatchSyncResponse,
     SubscriptionCreate,
     SubscriptionResponse,
     SubscriptionUpdate,
     SyncResponse,
 )
 from ..services.presenters import subscription_response
-from ..services.subscriptions import sync_subscription
+from ..services.subscriptions import (
+    PreparedSubscriptionSync,
+    persist_subscription_syncs,
+    prepare_subscription_sync,
+    sync_subscription,
+)
 
 router = APIRouter(prefix="/subscriptions", tags=["subscriptions"])
 
@@ -136,6 +143,56 @@ async def delete_subscription(
     await session.delete(subscription)
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/sync-all")
+async def sync_all_sources(
+    session: SessionDep,
+    settings: SettingsDep,
+    secret_box: SecretBoxDep,
+) -> BatchSyncResponse:
+    subscriptions = (
+        await session.scalars(
+            select(Subscription)
+            .where(Subscription.enabled.is_(True))
+            .order_by(Subscription.priority)
+        )
+    ).all()
+    if not subscriptions:
+        return BatchSyncResponse(total=0, healthy=0, errors=0, node_count=0)
+
+    semaphore = asyncio.Semaphore(8)
+
+    async def prepare(subscription: Subscription):
+        async with semaphore:
+            try:
+                return await prepare_subscription_sync(
+                    subscription, settings, secret_box
+                )
+            except Exception as exc:
+                return exc
+
+    results = await asyncio.gather(
+        *(prepare(s) for s in subscriptions),
+        return_exceptions=True,
+    )
+
+    prepared_syncs: list[PreparedSubscriptionSync] = []
+    errors: dict[str, Exception] = {}
+    for subscription, result in zip(subscriptions, results, strict=True):
+        if isinstance(result, Exception):
+            errors[subscription.id] = result
+        else:
+            prepared_syncs.append(result)
+
+    await persist_subscription_syncs(session, prepared_syncs, errors, secret_box)
+    node_count = sum(len(p.nodes) for p in prepared_syncs)
+    return BatchSyncResponse(
+        total=len(subscriptions),
+        healthy=len(prepared_syncs),
+        errors=len(errors),
+        node_count=node_count,
+    )
 
 
 @router.post("/{subscription_id}/sync")

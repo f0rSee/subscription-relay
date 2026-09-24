@@ -100,6 +100,17 @@ class SyncResponse(BaseModel):
     node_count: int
 
 
+class BatchSyncResponse(BaseModel):
+    total: int
+    healthy: int
+    errors: int
+    node_count: int
+
+
+class DeletedCountResponse(BaseModel):
+    deleted: int
+
+
 class ProfileResponse(BaseModel):
     id: str
     name: str
