@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query, Response, status
 from sqlalchemy import delete, select, update
 
-from ..dependencies import SessionDep
+from ..dependencies import RuntimeDep, SessionDep
 from ..models import ClientDevice, RequestLog
 from ..schemas import (
     ClientDeviceResponse,
@@ -80,27 +80,33 @@ async def clear_request_logs(session: SessionDep) -> DeletedCountResponse:
 
 
 @router.delete("/devices")
-async def clear_devices(session: SessionDep) -> DeletedCountResponse:
-    await session.execute(update(RequestLog).values(device_id=None))
-    result = await session.execute(delete(ClientDevice))
-    await session.commit()
-    count = result.rowcount if result.rowcount is not None else 0
-    return DeletedCountResponse(deleted=count)
+async def clear_devices(
+    session: SessionDep,
+    runtime: RuntimeDep,
+) -> DeletedCountResponse:
+    async with runtime.device_lock:
+        await session.execute(update(RequestLog).values(device_id=None))
+        result = await session.execute(delete(ClientDevice))
+        await session.commit()
+        count = result.rowcount if result.rowcount is not None else 0
+        return DeletedCountResponse(deleted=count)
 
 
 @router.delete("/devices/{device_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_device(
     device_id: str,
     session: SessionDep,
+    runtime: RuntimeDep,
 ) -> Response:
-    device = await session.get(ClientDevice, device_id)
-    if device is None:
-        raise HTTPException(status_code=404, detail="Device not found")
-    await session.execute(
-        update(RequestLog)
-        .where(RequestLog.device_id == device_id)
-        .values(device_id=None)
-    )
-    await session.delete(device)
-    await session.commit()
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    async with runtime.device_lock:
+        device = await session.get(ClientDevice, device_id)
+        if device is None:
+            raise HTTPException(status_code=404, detail="Device not found")
+        await session.execute(
+            update(RequestLog)
+            .where(RequestLog.device_id == device_id)
+            .values(device_id=None)
+        )
+        await session.delete(device)
+        await session.commit()
+        return Response(status_code=status.HTTP_204_NO_CONTENT)

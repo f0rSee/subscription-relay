@@ -241,19 +241,47 @@ export default function App() {
   }
 
   async function syncSubscription(subscription: Subscription) {
-    const result = await api.syncSubscription(subscription.id)
-    toast.success(`Получено серверов: ${result.node_count}`)
-    await loadDashboard()
-    if (selectedProfileId) setNodes(await api.profileNodes(selectedProfileId))
+    try {
+      const result = await api.syncSubscription(subscription.id)
+      toast.success(`Получено серверов: ${result.node_count}`)
+      await loadDashboard()
+      if (selectedProfileId) setNodes(await api.profileNodes(selectedProfileId))
+    } catch (err) {
+      toast.error(
+        err instanceof Error
+          ? err.message
+          : `Не удалось синхронизировать «${subscription.name}»`,
+      )
+    }
   }
 
   async function syncAllSubscriptions() {
-    const result = await api.syncAllSubscriptions()
-    toast.success("Источники синхронизированы", {
-      description: `Успешно: ${result.healthy} из ${result.total}, серверов: ${result.node_count}`,
-    })
-    await loadDashboard()
-    if (selectedProfileId) setNodes(await api.profileNodes(selectedProfileId))
+    try {
+      const result = await api.syncAllSubscriptions()
+      if (result.total === 0) {
+        toast.info("Нет активных источников для синхронизации")
+      } else if (result.healthy === 0) {
+        toast.error("Синхронизация не удалась", {
+          description: `Ошибок: ${result.errors} из ${result.total}`,
+        })
+      } else if (result.errors > 0) {
+        toast.warning("Синхронизировано частично", {
+          description: `Успешно: ${result.healthy} из ${result.total}, ошибок: ${result.errors}, серверов: ${result.node_count}`,
+        })
+      } else {
+        toast.success("Источники синхронизированы", {
+          description: `Успешно: ${result.healthy} из ${result.total}, серверов: ${result.node_count}`,
+        })
+      }
+      await loadDashboard()
+      if (selectedProfileId) setNodes(await api.profileNodes(selectedProfileId))
+    } catch (err) {
+      toast.error(
+        err instanceof Error
+          ? err.message
+          : "Не удалось синхронизировать источники",
+      )
+    }
   }
 
   async function deleteSubscription(subscription: Subscription) {

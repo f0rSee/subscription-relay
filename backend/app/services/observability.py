@@ -38,7 +38,7 @@ async def record_subscription_request(
     now = datetime.now(UTC)
 
     try:
-        async with runtime.database.sessions() as session:
+        async with runtime.device_lock, runtime.database.sessions() as session:
             device_id: str | None = None
 
             if device_tracking_enabled:
@@ -86,6 +86,26 @@ async def record_subscription_request(
                         requested_at=now,
                     )
                 )
-            await session.commit()
+            try:
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                if request_logging_enabled:
+                    session.add(
+                        RequestLog(
+                            profile_id=profile.id,
+                            profile_name=profile.name,
+                            request_type=request_type,
+                            device_id=None,
+                            client_name=client_name,
+                            user_agent=user_agent,
+                            ip_address=ip_address,
+                            status_code=status_code,
+                            node_count=node_count,
+                            error=error[:1000] if error else None,
+                            requested_at=now,
+                        )
+                    )
+                    await session.commit()
     except Exception:
         logger.exception("Failed to persist subscription request metadata")

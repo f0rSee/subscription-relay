@@ -168,6 +168,8 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
     setPendingId(id)
     try {
       await action()
+    } catch {
+      // Errors are surfaced via toast in the parent component
     } finally {
       setPendingId("")
     }
@@ -329,6 +331,8 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
                 setSyncingAll(true)
                 try {
                   await onSyncAll()
+                } catch {
+                  // Errors are surfaced via toast in the parent component
                 } finally {
                   setSyncingAll(false)
                 }

@@ -12,22 +12,33 @@ from .security import SecretBox, SessionManager
 
 class KeyedLock:
     """Manages independent locks keyed by identifier to prevent head-of-line
-    blocking.
+    blocking, with automatic cleanup when no waiters remain.
     """
 
     def __init__(self) -> None:
-        self._locks: dict[str, asyncio.Lock] = {}
+        self._locks: dict[str, tuple[asyncio.Lock, int]] = {}
         self._guard = asyncio.Lock()
 
     @asynccontextmanager
     async def acquire(self, key: str) -> AsyncIterator[None]:
         async with self._guard:
-            lock = self._locks.get(key)
-            if lock is None:
+            if key in self._locks:
+                lock, count = self._locks[key]
+                self._locks[key] = (lock, count + 1)
+            else:
                 lock = asyncio.Lock()
-                self._locks[key] = lock
-        async with lock:
-            yield
+                self._locks[key] = (lock, 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            async with self._guard:
+                if key in self._locks:
+                    lock, count = self._locks[key]
+                    if count <= 1:
+                        del self._locks[key]
+                    else:
+                        self._locks[key] = (lock, count - 1)
 
 
 @dataclass(frozen=True)
@@ -38,6 +49,8 @@ class AppRuntime:
     sessions: SessionManager
     refresh_lock: asyncio.Lock
     profile_locks: KeyedLock
+    subscription_locks: KeyedLock
+    device_lock: asyncio.Lock
 
 
 def create_runtime(settings: Settings) -> AppRuntime:
@@ -48,5 +61,6 @@ def create_runtime(settings: Settings) -> AppRuntime:
         sessions=SessionManager(settings),
         refresh_lock=asyncio.Lock(),
         profile_locks=KeyedLock(),
+        subscription_locks=KeyedLock(),
+        device_lock=asyncio.Lock(),
     )
-

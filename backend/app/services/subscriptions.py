@@ -251,12 +251,12 @@ async def persist_subscription_syncs(
     prepared_syncs: list[PreparedSubscriptionSync],
     errors: dict[str, Exception],
     secret_box: SecretBox,
-) -> None:
+) -> tuple[int, int]:
     subscription_ids = {prepared.subscription_id for prepared in prepared_syncs} | set(
         errors
     )
     if not subscription_ids:
-        return
+        return 0, 0
 
     subscriptions = {
         subscription.id: subscription
@@ -289,11 +289,15 @@ async def persist_subscription_syncs(
         ).all()
     }
 
+    persisted_count = 0
+    persisted_nodes = 0
     stale_node_ids: set[str] = set()
     for prepared in prepared_syncs:
         subscription = subscriptions.get(prepared.subscription_id)
         if subscription is None:
             continue
+        persisted_count += 1
+        persisted_nodes += len(prepared.nodes)
         existing = existing_by_subscription[prepared.subscription_id]
         active_ids: set[str] = set()
         fingerprint_occurrences: dict[str, int] = {}
@@ -374,6 +378,7 @@ async def persist_subscription_syncs(
             subscription.last_error = str(error)[:1000]
 
     await session.commit()
+    return persisted_count, persisted_nodes
 
 
 async def sync_subscription(
@@ -389,8 +394,10 @@ async def sync_subscription(
             settings,
             secret_box,
         )
-        await persist_subscription_syncs(session, [prepared], {}, secret_box)
-        return len(prepared.nodes)
+        _, node_count = await persist_subscription_syncs(
+            session, [prepared], {}, secret_box
+        )
+        return node_count
     except Exception as exc:
         await session.rollback()
         await persist_subscription_syncs(

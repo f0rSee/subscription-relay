@@ -20,7 +20,6 @@ from ..models import (
 from ..runtime import AppRuntime
 from .observability import record_subscription_request
 from .subscriptions import (
-    PreparedSubscriptionSync,
     encode_subscription,
     persist_subscription_syncs,
     prepare_subscription_sync,
@@ -126,43 +125,44 @@ async def refresh_profile_sources(
         if not subscriptions_to_refresh:
             return
 
-        # Network waits dominate synchronization, so fetch independent sources
-        # concurrently. The database update remains one atomic transaction.
+        # Coordinate refreshes per subscription so shared subscriptions across
+        # profiles do not race during sync and node persistence.
         semaphore = asyncio.Semaphore(8)
 
-        async def prepare(
-            subscription: Subscription,
-        ) -> PreparedSubscriptionSync:
-            async with semaphore:
-                return await prepare_subscription_sync(
-                    subscription,
-                    runtime.settings,
-                    runtime.secret_box,
-                )
+        async def refresh_subscription(subscription: Subscription) -> None:
+            sub_id = subscription.id
+            async with semaphore, runtime.subscription_locks.acquire(sub_id):
+                async with runtime.database.sessions() as sub_session:
+                    current_sub = await sub_session.get(Subscription, sub_id)
+                    if current_sub is None or not current_sub.enabled:
+                        return
+                    if _was_refreshed_since(current_sub.last_sync_at, requested_at):
+                        return
+                    try:
+                        prepared = await prepare_subscription_sync(
+                            current_sub,
+                            runtime.settings,
+                            runtime.secret_box,
+                        )
+                        await persist_subscription_syncs(
+                            sub_session,
+                            [prepared],
+                            {},
+                            runtime.secret_box,
+                        )
+                    except Exception as exc:
+                        await sub_session.rollback()
+                        await persist_subscription_syncs(
+                            sub_session,
+                            [],
+                            {sub_id: exc},
+                            runtime.secret_box,
+                        )
 
-        results = await asyncio.gather(
-            *(prepare(subscription) for subscription in subscriptions_to_refresh),
+        await asyncio.gather(
+            *(refresh_subscription(s) for s in subscriptions_to_refresh),
             return_exceptions=True,
         )
-        prepared_syncs: list[PreparedSubscriptionSync] = []
-        errors: dict[str, Exception] = {}
-        for subscription, result in zip(
-            subscriptions_to_refresh,
-            results,
-            strict=True,
-        ):
-            if isinstance(result, Exception):
-                errors[subscription.id] = result
-            else:
-                prepared_syncs.append(result)
-
-        async with runtime.database.sessions() as session:
-            await persist_subscription_syncs(
-                session,
-                prepared_syncs,
-                errors,
-                runtime.secret_box,
-            )
 
 
 async def render_profile(

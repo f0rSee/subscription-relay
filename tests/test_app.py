@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import sys
 from pathlib import Path
 
 import httpx
@@ -785,9 +786,7 @@ def test_utf8_bom_handling():
 
 
 def test_masked_url_masks_userinfo_credentials():
-    masked = _masked_url(
-        "https://admin:supersecret@sub.example.com/api/get?token=123"
-    )
+    masked = _masked_url("https://admin:supersecret@sub.example.com/api/get?token=123")
     assert "supersecret" not in masked
     assert "admin" not in masked
     assert masked == "https://••••••@sub.example.com/api/get?•••"
@@ -881,3 +880,83 @@ def test_clear_request_logs_and_devices(tmp_path, monkeypatch):
 
     asyncio.run(with_client(app, scenario))
 
+
+def test_keyed_lock_memory_cleanup():
+    from backend.app.runtime import KeyedLock
+
+    async def scenario():
+        lock = KeyedLock()
+        async with lock.acquire("key1"):
+            assert "key1" in lock._locks
+            assert lock._locks["key1"][1] == 1
+        assert "key1" not in lock._locks
+        assert len(lock._locks) == 0
+
+        # Concurrency check
+        step = 0
+
+        async def worker():
+            nonlocal step
+            async with lock.acquire("shared"):
+                step += 1
+                await asyncio.sleep(0.01)
+
+        await asyncio.gather(worker(), worker(), worker())
+        assert step == 3
+        assert "shared" not in lock._locks
+        assert len(lock._locks) == 0
+
+    asyncio.run(scenario())
+
+
+def test_batch_sync_skips_deleted_subscription(tmp_path, monkeypatch):
+    app = create_app(settings_for(tmp_path))
+
+    node_uri = "vless://user@1.1.1.1:443?encryption=none#TestNode"
+    encoded = base64.b64encode(node_uri.encode()).decode()
+
+    async def fake_fetch(url, settings):
+        return encoded.encode(), httpx.Headers()
+
+    monkeypatch.setattr(
+        "backend.app.services.subscriptions.fetch_subscription", fake_fetch
+    )
+
+    async def scenario(client: httpx.AsyncClient):
+        csrf = await login(client)
+        sub = await client.post(
+            "/api/subscriptions",
+            headers={"X-CSRF-Token": csrf},
+            json={"name": "TempSub", "url": "https://temp.example/sub"},
+        )
+        assert sub.status_code == 201
+        sub_id = sub.json()["id"]
+
+        original_prepare = sys.modules[
+            "backend.app.api.subscriptions"
+        ].prepare_subscription_sync
+
+        async def prepare_and_delete(subscription, settings, secret_box):
+            result = await original_prepare(subscription, settings, secret_box)
+            if subscription.id == sub_id:
+                await client.delete(
+                    f"/api/subscriptions/{sub_id}",
+                    headers={"X-CSRF-Token": csrf},
+                )
+            return result
+
+        monkeypatch.setattr(
+            "backend.app.api.subscriptions.prepare_subscription_sync",
+            prepare_and_delete,
+        )
+
+        sync_all = await client.post(
+            "/api/subscriptions/sync-all",
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert sync_all.status_code == 200
+        data = sync_all.json()
+        assert data["healthy"] == 1
+        assert data["node_count"] == 1
+
+    asyncio.run(with_client(app, scenario))
