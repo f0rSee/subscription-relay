@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import httpx
+import pytest
 
 from backend.app.config import Settings, _normalize_database_url
 from backend.app.main import create_app
@@ -958,5 +959,34 @@ def test_batch_sync_skips_deleted_subscription(tmp_path, monkeypatch):
         data = sync_all.json()
         assert data["healthy"] == 1
         assert data["node_count"] == 1
+
+    asyncio.run(with_client(app, scenario))
+
+
+def test_refresh_profile_sources_propagates_unrecorded_failures(tmp_path, monkeypatch):
+    app = create_app(settings_for(tmp_path))
+
+    async def scenario(client: httpx.AsyncClient):
+        runtime = app.state.runtime
+
+        import backend.app.services.profiles as prof_mod
+
+        async def fail_persist(*args, **kwargs):
+            raise RuntimeError("Database completely crashed")
+
+        monkeypatch.setattr(prof_mod, "persist_subscription_syncs", fail_persist)
+
+        from sqlalchemy import select
+
+        from backend.app.models import Profile
+
+        async with runtime.database.sessions() as s:
+            p = (await s.scalars(select(Profile))).first()
+            pid = p.id
+
+        with pytest.raises(RuntimeError, match="Database completely crashed"):
+            await prof_mod.refresh_profile_sources(
+                runtime, pid, auto_refresh_enabled=True
+            )
 
     asyncio.run(with_client(app, scenario))

@@ -40,6 +40,7 @@ import {
   Trash2Icon,
   TriangleAlertIcon,
 } from "lucide-react"
+import { toast } from "sonner"
 
 interface SubscriptionsViewProps {
   subscriptions: Subscription[]
@@ -168,8 +169,10 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
     setPendingId(id)
     try {
       await action()
-    } catch {
-      // Errors are surfaced via toast in the parent component
+    } catch (reason) {
+      toast.error(
+        reason instanceof Error ? reason.message : "Операция не выполнена",
+      )
     } finally {
       setPendingId("")
     }
@@ -331,8 +334,12 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
                 setSyncingAll(true)
                 try {
                   await onSyncAll()
-                } catch {
-                  // Errors are surfaced via toast in the parent component
+                } catch (reason) {
+                  toast.error(
+                    reason instanceof Error
+                      ? reason.message
+                      : "Не удалось синхронизировать источники",
+                  )
                 } finally {
                   setSyncingAll(false)
                 }

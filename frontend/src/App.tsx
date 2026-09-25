@@ -235,9 +235,13 @@ export default function App() {
   }
 
   async function toggleSubscription(subscription: Subscription, enabled: boolean) {
-    await api.updateSubscription(subscription.id, { enabled })
-    toast.success(enabled ? "Источник включён" : "Источник выключен")
-    await loadDashboard()
+    try {
+      await api.updateSubscription(subscription.id, { enabled })
+      toast.success(enabled ? "Источник включён" : "Источник выключен")
+      await loadDashboard()
+    } catch (reason) {
+      toast.error(errorMessage(reason))
+    }
   }
 
   async function syncSubscription(subscription: Subscription) {
@@ -285,9 +289,13 @@ export default function App() {
   }
 
   async function deleteSubscription(subscription: Subscription) {
-    await api.deleteSubscription(subscription.id)
-    toast.success(`Источник «${subscription.name}» удалён`)
-    await loadDashboard()
+    try {
+      await api.deleteSubscription(subscription.id)
+      toast.success(`Источник «${subscription.name}» удалён`)
+      await loadDashboard()
+    } catch (reason) {
+      toast.error(errorMessage(reason))
+    }
   }
 
   async function createProfile(input: ProfileInput) {
@@ -311,17 +319,25 @@ export default function App() {
   }
 
   async function deleteProfile(profile: Profile) {
-    await api.deleteProfile(profile.id)
-    toast.success(`Профиль «${profile.name}» удалён`)
-    await loadDashboard()
+    try {
+      await api.deleteProfile(profile.id)
+      toast.success(`Профиль «${profile.name}» удалён`)
+      await loadDashboard()
+    } catch (reason) {
+      toast.error(errorMessage(reason))
+    }
   }
 
   async function saveNodeOrder(profileId: string, orderedNodes: ProfileNode[]) {
-    await api.updateNodeOrder(
-      profileId,
-      orderedNodes.map((node) => node.id),
-    )
-    toast.success("Порядок серверов сохранён")
+    try {
+      await api.updateNodeOrder(
+        profileId,
+        orderedNodes.map((node) => node.id),
+      )
+      toast.success("Порядок серверов сохранён")
+    } catch (reason) {
+      toast.error(errorMessage(reason))
+    }
   }
 
   async function clearRequestLogs() {

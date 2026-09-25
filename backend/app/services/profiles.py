@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime
 from typing import TypeAlias
 
@@ -25,6 +26,8 @@ from .subscriptions import (
     prepare_subscription_sync,
 )
 from .traffic import profile_traffic_summary, subscription_userinfo_header
+
+logger = logging.getLogger(__name__)
 
 ProfileNodeRow: TypeAlias = tuple[
     Node,
@@ -151,18 +154,56 @@ async def refresh_profile_sources(
                             runtime.secret_box,
                         )
                     except Exception as exc:
-                        await sub_session.rollback()
-                        await persist_subscription_syncs(
-                            sub_session,
-                            [],
-                            {sub_id: exc},
-                            runtime.secret_box,
+                        logger.warning(
+                            "Failed to sync subscription %s: %s", sub_id, exc
                         )
+                        try:
+                            await sub_session.rollback()
+                            await persist_subscription_syncs(
+                                sub_session,
+                                [],
+                                {sub_id: exc},
+                                runtime.secret_box,
+                            )
+                        except Exception as persist_err:
+                            logger.exception(
+                                "Failed to record error for subscription %s: %s",
+                                sub_id,
+                                persist_err,
+                            )
+                            try:
+                                async with runtime.database.sessions() as err_session:
+                                    await persist_subscription_syncs(
+                                        err_session,
+                                        [],
+                                        {sub_id: exc},
+                                        runtime.secret_box,
+                                    )
+                            except Exception as fallback_err:
+                                logger.exception(
+                                    "Failed to persist error in fallback for %s",
+                                    sub_id,
+                                )
+                                raise fallback_err from exc
 
-        await asyncio.gather(
+        results = await asyncio.gather(
             *(refresh_subscription(s) for s in subscriptions_to_refresh),
             return_exceptions=True,
         )
+        failures = [res for res in results if isinstance(res, Exception)]
+        if failures:
+            for failure in failures:
+                logger.error(
+                    "Subscription refresh failed unexpectedly: %s",
+                    failure,
+                    exc_info=failure,
+                )
+            if len(failures) == 1:
+                raise failures[0]
+            raise ExceptionGroup(
+                "Subscription refreshes failed and errors could not be recorded",
+                failures,
+            )
 
 
 async def render_profile(
