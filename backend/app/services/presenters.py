@@ -19,7 +19,11 @@ def _masked_url(url: str) -> str:
     if len(path) > 48:
         path = path[:45] + "…"
     suffix = "?•••" if parsed.query else ""
-    return f"{parsed.scheme}://{parsed.netloc}{path}{suffix}"
+    netloc = parsed.netloc
+    if "@" in netloc:
+        _, _, host_port = netloc.rpartition("@")
+        netloc = f"••••••@{host_port}"
+    return f"{parsed.scheme}://{netloc}{path}{suffix}"
 
 
 def subscription_response(

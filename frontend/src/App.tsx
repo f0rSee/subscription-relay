@@ -235,22 +235,67 @@ export default function App() {
   }
 
   async function toggleSubscription(subscription: Subscription, enabled: boolean) {
-    await api.updateSubscription(subscription.id, { enabled })
-    toast.success(enabled ? "Источник включён" : "Источник выключен")
-    await loadDashboard()
+    try {
+      await api.updateSubscription(subscription.id, { enabled })
+      toast.success(enabled ? "Источник включён" : "Источник выключен")
+      await loadDashboard()
+    } catch (reason) {
+      toast.error(errorMessage(reason))
+    }
   }
 
   async function syncSubscription(subscription: Subscription) {
-    const result = await api.syncSubscription(subscription.id)
-    toast.success(`Получено серверов: ${result.node_count}`)
-    await loadDashboard()
-    if (selectedProfileId) setNodes(await api.profileNodes(selectedProfileId))
+    try {
+      const result = await api.syncSubscription(subscription.id)
+      toast.success(`Получено серверов: ${result.node_count}`)
+      await loadDashboard()
+      if (selectedProfileId) setNodes(await api.profileNodes(selectedProfileId))
+    } catch (err) {
+      toast.error(
+        err instanceof Error
+          ? err.message
+          : `Не удалось синхронизировать «${subscription.name}»`,
+      )
+    }
+  }
+
+  async function syncAllSubscriptions() {
+    try {
+      const result = await api.syncAllSubscriptions()
+      if (result.total === 0) {
+        toast.info("Нет активных источников для синхронизации")
+      } else if (result.healthy === 0) {
+        toast.error("Синхронизация не удалась", {
+          description: `Ошибок: ${result.errors} из ${result.total}`,
+        })
+      } else if (result.errors > 0) {
+        toast.warning("Синхронизировано частично", {
+          description: `Успешно: ${result.healthy} из ${result.total}, ошибок: ${result.errors}, серверов: ${result.node_count}`,
+        })
+      } else {
+        toast.success("Источники синхронизированы", {
+          description: `Успешно: ${result.healthy} из ${result.total}, серверов: ${result.node_count}`,
+        })
+      }
+      await loadDashboard()
+      if (selectedProfileId) setNodes(await api.profileNodes(selectedProfileId))
+    } catch (err) {
+      toast.error(
+        err instanceof Error
+          ? err.message
+          : "Не удалось синхронизировать источники",
+      )
+    }
   }
 
   async function deleteSubscription(subscription: Subscription) {
-    await api.deleteSubscription(subscription.id)
-    toast.success(`Источник «${subscription.name}» удалён`)
-    await loadDashboard()
+    try {
+      await api.deleteSubscription(subscription.id)
+      toast.success(`Источник «${subscription.name}» удалён`)
+      await loadDashboard()
+    } catch (reason) {
+      toast.error(errorMessage(reason))
+    }
   }
 
   async function createProfile(input: ProfileInput) {
@@ -274,17 +319,47 @@ export default function App() {
   }
 
   async function deleteProfile(profile: Profile) {
-    await api.deleteProfile(profile.id)
-    toast.success(`Профиль «${profile.name}» удалён`)
-    await loadDashboard()
+    try {
+      await api.deleteProfile(profile.id)
+      toast.success(`Профиль «${profile.name}» удалён`)
+      await loadDashboard()
+    } catch (reason) {
+      toast.error(errorMessage(reason))
+    }
   }
 
   async function saveNodeOrder(profileId: string, orderedNodes: ProfileNode[]) {
-    await api.updateNodeOrder(
-      profileId,
-      orderedNodes.map((node) => node.id),
-    )
-    toast.success("Порядок серверов сохранён")
+    try {
+      await api.updateNodeOrder(
+        profileId,
+        orderedNodes.map((node) => node.id),
+      )
+      toast.success("Порядок серверов сохранён")
+    } catch (reason) {
+      toast.error(errorMessage(reason))
+    }
+  }
+
+  async function clearRequestLogs() {
+    try {
+      const res = await api.clearRequestLogs()
+      setRequestLogs([])
+      toast.success(`История запросов очищена (${res.deleted} записей)`)
+      await loadDashboard()
+    } catch (reason) {
+      toast.error(errorMessage(reason))
+    }
+  }
+
+  async function clearDevices() {
+    try {
+      const res = await api.clearDevices()
+      setDevices([])
+      toast.success(`Список устройств очищен (${res.deleted} устройств)`)
+      await loadDashboard()
+    } catch (reason) {
+      toast.error(errorMessage(reason))
+    }
   }
 
   async function updateRelaySettings(input: RelaySettingsInput) {
@@ -390,6 +465,7 @@ export default function App() {
                 onCreate={createSubscription}
                 onToggle={toggleSubscription}
                 onSync={syncSubscription}
+                onSyncAll={syncAllSubscriptions}
                 onDelete={deleteSubscription}
               />
             )}
@@ -423,6 +499,7 @@ export default function App() {
                 loading={loadingLogs}
                 error={logsError}
                 onRefresh={() => void loadLogs()}
+                onClear={clearRequestLogs}
               />
             )}
             {activeView === "devices" && (
@@ -431,6 +508,7 @@ export default function App() {
                 loading={loadingDevices}
                 error={devicesError}
                 onRefresh={() => void loadDevices()}
+                onClear={clearDevices}
               />
             )}
             {activeView === "settings" && (

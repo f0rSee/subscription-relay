@@ -14,6 +14,7 @@ import {
   SortableItem,
   SortableItemHandle,
 } from "@/components/reui/sortable"
+import { Input } from "@/components/ui/input"
 import {
   Select,
   SelectContent,
@@ -22,7 +23,12 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
-import { GripVerticalIcon, ServerIcon, TriangleAlertIcon } from "lucide-react"
+import {
+  GripVerticalIcon,
+  SearchIcon,
+  ServerIcon,
+  TriangleAlertIcon,
+} from "lucide-react"
 
 interface NodeOrderViewProps {
   profiles: Profile[]
@@ -46,6 +52,7 @@ export function NodeOrderView({
   const [nodes, setNodes] = useState(loadedNodes)
   const [saveError, setSaveError] = useState("")
   const [saving, setSaving] = useState(false)
+  const [searchQuery, setSearchQuery] = useState("")
 
   const groups: Array<{ id: string; name: string; nodes: ProfileNode[] }> = []
   const groupsById = new Map<string, (typeof groups)[number]>()
@@ -63,6 +70,21 @@ export function NodeOrderView({
       groupsById.set(node.subscription_id, nextGroup)
     }
   }
+
+  const query = searchQuery.trim().toLowerCase()
+  const displayedGroups = query
+    ? groups
+        .map((group) => ({
+          ...group,
+          nodes: group.nodes.filter(
+            (node) =>
+              node.name.toLowerCase().includes(query) ||
+              (node.host && node.host.toLowerCase().includes(query)) ||
+              node.protocol.toLowerCase().includes(query),
+          ),
+        }))
+        .filter((group) => group.nodes.length > 0)
+    : groups
 
   function replaceGroup(sourceId: string, value: ProfileNode[]) {
     let sourceIndex = 0
@@ -103,8 +125,20 @@ export function NodeOrderView({
             Источники идут в порядке профиля; здесь серверы сортируются внутри каждой группы.
           </FrameDescription>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {saving && <span className="text-xs text-muted-foreground">Сохраняю…</span>}
+          <div className="relative">
+            <SearchIcon
+              className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+              aria-hidden="true"
+            />
+            <Input
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Поиск серверов…"
+              className="h-9 w-44 pl-8 text-xs sm:w-56"
+            />
+          </div>
           <Select value={selectedProfileId} onValueChange={(value) => value && onProfileChange(value)}>
             <SelectTrigger className="w-52" aria-label="Выберите профиль">
               <SelectValue placeholder="Выберите профиль" />
@@ -126,15 +160,20 @@ export function NodeOrderView({
           <AlertDescription>{saveError || error}</AlertDescription>
         </Alert>
       )}
+      {query && (
+        <p className="px-1 text-xs text-muted-foreground">
+          Фильтрация активна. Сортировка перетаскиванием доступна при сбросе поиска.
+        </p>
+      )}
       {loading ? (
         <div className="grid gap-1">
           {Array.from({ length: 6 }).map((_, index) => (
             <Skeleton key={index} className="h-14 w-full rounded-lg" />
           ))}
         </div>
-      ) : nodes.length ? (
+      ) : displayedGroups.length ? (
         <div className="grid gap-5">
-          {groups.map((group, groupIndex) => (
+          {displayedGroups.map((group, groupIndex) => (
             <section key={group.id} className="grid gap-2">
               <div className="flex items-center justify-between gap-3 px-1">
                 <div className="min-w-0">
@@ -160,11 +199,15 @@ export function NodeOrderView({
                 className="grid gap-1"
               >
                 {group.nodes.map((node, index) => (
-                  <SortableItem key={node.id} value={node.id} disabled={saving}>
+                  <SortableItem
+                    key={node.id}
+                    value={node.id}
+                    disabled={saving || Boolean(query)}
+                  >
                     <FramePanel className="p-0!">
                       <div className="group flex items-center gap-3 px-3 py-2.5">
                         <SortableItemHandle
-                          className="text-muted-foreground hover:text-foreground"
+                          className={query ? "text-muted-foreground/40 cursor-not-allowed" : "text-muted-foreground hover:text-foreground"}
                           aria-label={`Переместить ${node.name}`}
                         >
                           <GripVerticalIcon className="size-4" aria-hidden="true" />
@@ -197,6 +240,12 @@ export function NodeOrderView({
             </section>
           ))}
         </div>
+      ) : query ? (
+        <FramePanel>
+          <p className="py-10 text-center text-sm text-muted-foreground">
+            Серверы не найдены по запросу «{searchQuery}».
+          </p>
+        </FramePanel>
       ) : (
         <FramePanel>
           <p className="py-10 text-center text-sm text-muted-foreground">

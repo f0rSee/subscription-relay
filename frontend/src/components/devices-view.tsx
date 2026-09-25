@@ -21,13 +21,14 @@ import {
 import { Button } from "@/components/ui/button"
 import { useTable } from "@tanstack/react-table"
 import type { ColumnDef, PaginationState, SortingState } from "@tanstack/react-table"
-import { RefreshCwIcon, TriangleAlertIcon } from "lucide-react"
+import { RefreshCwIcon, Trash2Icon, TriangleAlertIcon } from "lucide-react"
 
 interface DevicesViewProps {
   devices: ClientDevice[]
   loading: boolean
   error: string
   onRefresh: () => void
+  onClear?: () => Promise<void>
 }
 
 function formatDate(value: string) {
@@ -37,7 +38,7 @@ function formatDate(value: string) {
   }).format(new Date(value))
 }
 
-export function DevicesView({ devices, loading, error, onRefresh }: DevicesViewProps) {
+export function DevicesView({ devices, loading, error, onRefresh, onClear }: DevicesViewProps) {
   const [pagination, setPagination] = useState<PaginationState>({
     pageIndex: 0,
     pageSize: 25,
@@ -45,6 +46,7 @@ export function DevicesView({ devices, loading, error, onRefresh }: DevicesViewP
   const [sorting, setSorting] = useState<SortingState>([
     { id: "last_seen_at", desc: true },
   ])
+  const [clearing, setClearing] = useState(false)
 
   const columns = useMemo<ColumnDef<DataGridFeatures, ClientDevice>[]>(
     () => [
@@ -153,10 +155,33 @@ export function DevicesView({ devices, loading, error, onRefresh }: DevicesViewP
             Клиенты определяются по комбинации IP-адреса и User-Agent.
           </FrameDescription>
         </div>
-        <Button type="button" size="sm" variant="outline" onClick={onRefresh}>
-          <RefreshCwIcon className={loading ? "animate-spin" : ""} aria-hidden="true" />
-          Обновить
-        </Button>
+        <div className="flex items-center gap-2">
+          {onClear && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={clearing || loading || devices.length === 0}
+              onClick={async () => {
+                if (window.confirm("Очистить список обнаруженных устройств?")) {
+                  setClearing(true)
+                  try {
+                    await onClear()
+                  } finally {
+                    setClearing(false)
+                  }
+                }
+              }}
+            >
+              <Trash2Icon className="size-4" aria-hidden="true" />
+              {clearing ? "Очищаю…" : "Очистить"}
+            </Button>
+          )}
+          <Button type="button" size="sm" variant="outline" onClick={onRefresh}>
+            <RefreshCwIcon className={loading ? "animate-spin" : ""} aria-hidden="true" />
+            Обновить
+          </Button>
+        </div>
       </FrameHeader>
       <FramePanel className="p-2!">
         {error && (

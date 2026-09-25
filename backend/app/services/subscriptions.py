@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 import httpx
 from sqlalchemy import delete, select
@@ -24,8 +24,10 @@ SUPPORTED_PROTOCOLS = (
     "ssr",
     "hysteria",
     "hysteria2",
+    "hy2",
     "tuic",
     "wireguard",
+    "wg",
 )
 UPSTREAM_USER_AGENT = "VPNClient/2.0/ios/2731171157721"
 UPSTREAM_HEADERS = {
@@ -85,18 +87,55 @@ def _try_decode_base64(value: str) -> str | None:
 
 def _node_metadata(uri: str) -> tuple[str, str, str | None]:
     parsed = urlsplit(uri)
-    protocol = parsed.scheme.lower()
+    raw_protocol = parsed.scheme.lower()
+    protocol = (
+        "hysteria2"
+        if raw_protocol == "hy2"
+        else "wireguard"
+        if raw_protocol == "wg"
+        else raw_protocol
+    )
     name = unquote(parsed.fragment).strip()
     host = parsed.hostname
 
     if protocol == "vmess":
         try:
-            payload = uri.split("://", 1)[1]
+            payload = uri.split("://", 1)[1].split("#", 1)[0]
             decoded = _decode_base64_text(payload)
             data = json.loads(decoded or "{}")
             name = str(data.get("ps") or name).strip()
             host = str(data.get("add") or "").strip() or host
         except (ValueError, TypeError, json.JSONDecodeError):
+            pass
+    elif protocol == "ss":
+        try:
+            payload = uri.split("://", 1)[1].split("#", 1)[0]
+            if "@" not in payload:
+                decoded = _decode_base64_text(payload)
+                if decoded and "@" in decoded:
+                    _, _, host_port = decoded.rpartition("@")
+                    h, _, _ = host_port.rpartition(":")
+                    host = (h or host_port).strip("[]")
+        except Exception:
+            pass
+    elif protocol == "ssr":
+        try:
+            payload = uri.split("://", 1)[1].split("#", 1)[0]
+            decoded = _decode_base64_text(payload)
+            if decoded:
+                main_part, _, query_part = decoded.partition("/?")
+                if not query_part and "?" in decoded:
+                    main_part, _, query_part = decoded.partition("?")
+                parts = main_part.split(":")
+                if parts:
+                    host = parts[0].strip("[]")
+                if query_part:
+                    params = dict(parse_qsl(query_part, keep_blank_values=True))
+                    if "remarks" in params:
+                        remarks_decoded = _decode_base64_text(params["remarks"])
+                        if remarks_decoded:
+                            name = remarks_decoded.strip()
+        except Exception:
             pass
 
     if not name:
@@ -105,7 +144,7 @@ def _node_metadata(uri: str) -> tuple[str, str, str | None]:
 
 
 def parse_subscription(body: bytes) -> list[ParsedNode]:
-    text = body.decode("utf-8", errors="replace").strip()
+    text = body.decode("utf-8-sig", errors="replace").strip()
     decoded = _try_decode_base64(text)
     if decoded:
         text = decoded
@@ -212,12 +251,12 @@ async def persist_subscription_syncs(
     prepared_syncs: list[PreparedSubscriptionSync],
     errors: dict[str, Exception],
     secret_box: SecretBox,
-) -> None:
+) -> tuple[int, int]:
     subscription_ids = {prepared.subscription_id for prepared in prepared_syncs} | set(
         errors
     )
     if not subscription_ids:
-        return
+        return 0, 0
 
     subscriptions = {
         subscription.id: subscription
@@ -250,11 +289,15 @@ async def persist_subscription_syncs(
         ).all()
     }
 
+    persisted_count = 0
+    persisted_nodes = 0
     stale_node_ids: set[str] = set()
     for prepared in prepared_syncs:
         subscription = subscriptions.get(prepared.subscription_id)
         if subscription is None:
             continue
+        persisted_count += 1
+        persisted_nodes += len(prepared.nodes)
         existing = existing_by_subscription[prepared.subscription_id]
         active_ids: set[str] = set()
         fingerprint_occurrences: dict[str, int] = {}
@@ -323,7 +366,10 @@ async def persist_subscription_syncs(
             usage.updated_at = prepared.synced_at
 
     if stale_node_ids:
-        await session.execute(delete(Node).where(Node.id.in_(stale_node_ids)))
+        stale_list = list(stale_node_ids)
+        for i in range(0, len(stale_list), 500):
+            chunk = stale_list[i : i + 500]
+            await session.execute(delete(Node).where(Node.id.in_(chunk)))
 
     for subscription_id, error in errors.items():
         subscription = subscriptions.get(subscription_id)
@@ -332,6 +378,7 @@ async def persist_subscription_syncs(
             subscription.last_error = str(error)[:1000]
 
     await session.commit()
+    return persisted_count, persisted_nodes
 
 
 async def sync_subscription(
@@ -347,8 +394,10 @@ async def sync_subscription(
             settings,
             secret_box,
         )
-        await persist_subscription_syncs(session, [prepared], {}, secret_box)
-        return len(prepared.nodes)
+        _, node_count = await persist_subscription_syncs(
+            session, [prepared], {}, secret_box
+        )
+        return node_count
     except Exception as exc:
         await session.rollback()
         await persist_subscription_syncs(

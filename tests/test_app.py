@@ -1,12 +1,15 @@
 import asyncio
 import base64
+import sys
 from pathlib import Path
 
 import httpx
+import pytest
 
 from backend.app.config import Settings, _normalize_database_url
 from backend.app.main import create_app
 from backend.app.models import SubscriptionUsage
+from backend.app.services.presenters import _masked_url
 from backend.app.services.subscriptions import (
     UPSTREAM_HEADERS,
     UPSTREAM_USER_AGENT,
@@ -739,5 +742,251 @@ def test_request_logs_devices_settings_and_deduplication(tmp_path, monkeypatch):
         devices_after_disable = (await client.get("/api/devices")).json()
         assert len(devices_after_disable) == 2
         assert sum(device["request_count"] for device in devices_after_disable) == 2
+
+    asyncio.run(with_client(app, scenario))
+
+
+def test_parses_hy2_wg_legacy_ss_and_ssr_metadata():
+    hy2_uri = "hy2://secret@hy2.example.com:443?insecure=1#Hysteria2%20Node"
+    wg_uri = "wg://private@wg.example.com:51820#WG%20Node"
+    legacy_ss_inner = "aes-256-gcm:secret@ss.example.com:8443"
+    legacy_ss_b64 = base64.b64encode(legacy_ss_inner.encode()).decode()
+    legacy_ss_uri = f"ss://{legacy_ss_b64}#SS%20Legacy"
+    ssr_remarks = base64.urlsafe_b64encode(b"SSR Node").decode().rstrip("=")
+    ssr_inner = f"1.2.3.4:8388:origin:aes-256-cfb:plain:YWRtaW4=/?remarks={ssr_remarks}"
+    ssr_b64 = base64.urlsafe_b64encode(ssr_inner.encode()).decode().rstrip("=")
+    ssr_uri = f"ssr://{ssr_b64}"
+
+    plain = f"{hy2_uri}\n{wg_uri}\n{legacy_ss_uri}\n{ssr_uri}\n"
+    nodes = parse_subscription(plain.encode())
+
+    assert len(nodes) == 4
+    assert nodes[0].protocol == "hysteria2"
+    assert nodes[0].name == "Hysteria2 Node"
+    assert nodes[0].host == "hy2.example.com"
+
+    assert nodes[1].protocol == "wireguard"
+    assert nodes[1].name == "WG Node"
+    assert nodes[1].host == "wg.example.com"
+
+    assert nodes[2].protocol == "ss"
+    assert nodes[2].name == "SS Legacy"
+    assert nodes[2].host == "ss.example.com"
+
+    assert nodes[3].protocol == "ssr"
+    assert nodes[3].name == "SSR Node"
+    assert nodes[3].host == "1.2.3.4"
+
+
+def test_utf8_bom_handling():
+    body = b"\xef\xbb\xbfvless://id@bom.example.com:443#WithBOM\n"
+    nodes = parse_subscription(body)
+    assert len(nodes) == 1
+    assert nodes[0].name == "WithBOM"
+    assert nodes[0].host == "bom.example.com"
+
+
+def test_masked_url_masks_userinfo_credentials():
+    masked = _masked_url("https://admin:supersecret@sub.example.com/api/get?token=123")
+    assert "supersecret" not in masked
+    assert "admin" not in masked
+    assert masked == "https://••••••@sub.example.com/api/get?•••"
+
+
+def test_batch_sync_all_sources(tmp_path, monkeypatch):
+    app = create_app(settings_for(tmp_path))
+    calls_by_url = {}
+
+    async def fake_fetch(url, settings):
+        calls_by_url[url] = calls_by_url.get(url, 0) + 1
+        host = "first.example" if "provider.example" in url else "second.example"
+        body = f"vless://id@{host}:443#{host}\n".encode()
+        return base64.b64encode(body), httpx.Headers()
+
+    monkeypatch.setattr(
+        "backend.app.services.subscriptions.fetch_subscription", fake_fetch
+    )
+
+    async def scenario(client: httpx.AsyncClient):
+        csrf = await login(client)
+        second = await client.post(
+            "/api/subscriptions",
+            headers={"X-CSRF-Token": csrf},
+            json={"name": "Second", "url": "https://second.example/sub"},
+        )
+        assert second.status_code == 201
+
+        sync_all = await client.post(
+            "/api/subscriptions/sync-all",
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert sync_all.status_code == 200
+        data = sync_all.json()
+        assert data["total"] == 2
+        assert data["healthy"] == 2
+        assert data["errors"] == 0
+        assert data["node_count"] == 2
+        assert all(count == 1 for count in calls_by_url.values())
+
+    asyncio.run(with_client(app, scenario))
+
+
+def test_clear_request_logs_and_devices(tmp_path, monkeypatch):
+    app = create_app(settings_for(tmp_path))
+    upstream = base64.b64encode(b"vless://id@node.example:443#Node\n")
+
+    async def fake_fetch(url, settings):
+        return upstream, httpx.Headers({"content-type": "text/plain"})
+
+    monkeypatch.setattr(
+        "backend.app.services.subscriptions.fetch_subscription", fake_fetch
+    )
+
+    async def scenario(client: httpx.AsyncClient):
+        csrf = await login(client)
+        resp = await client.get(
+            "/s/test-relay-token-at-least-16",
+            headers={"User-Agent": "Shadowrocket/2.2.0"},
+        )
+        assert resp.status_code == 200
+
+        logs = (await client.get("/api/request-logs")).json()
+        assert len(logs) == 1
+
+        devices = (await client.get("/api/devices")).json()
+        assert len(devices) == 1
+        device_id = devices[0]["id"]
+
+        clear_logs = await client.delete(
+            "/api/request-logs",
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert clear_logs.status_code == 200
+        assert clear_logs.json()["deleted"] == 1
+        assert len((await client.get("/api/request-logs")).json()) == 0
+
+        del_device = await client.delete(
+            f"/api/devices/{device_id}",
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert del_device.status_code == 204
+        assert len((await client.get("/api/devices")).json()) == 0
+
+        clear_devices = await client.delete(
+            "/api/devices",
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert clear_devices.status_code == 200
+        assert clear_devices.json()["deleted"] == 0
+
+    asyncio.run(with_client(app, scenario))
+
+
+def test_keyed_lock_memory_cleanup():
+    from backend.app.runtime import KeyedLock
+
+    async def scenario():
+        lock = KeyedLock()
+        async with lock.acquire("key1"):
+            assert "key1" in lock._locks
+            assert lock._locks["key1"][1] == 1
+        assert "key1" not in lock._locks
+        assert len(lock._locks) == 0
+
+        # Concurrency check
+        step = 0
+
+        async def worker():
+            nonlocal step
+            async with lock.acquire("shared"):
+                step += 1
+                await asyncio.sleep(0.01)
+
+        await asyncio.gather(worker(), worker(), worker())
+        assert step == 3
+        assert "shared" not in lock._locks
+        assert len(lock._locks) == 0
+
+    asyncio.run(scenario())
+
+
+def test_batch_sync_skips_deleted_subscription(tmp_path, monkeypatch):
+    app = create_app(settings_for(tmp_path))
+
+    node_uri = "vless://user@1.1.1.1:443?encryption=none#TestNode"
+    encoded = base64.b64encode(node_uri.encode()).decode()
+
+    async def fake_fetch(url, settings):
+        return encoded.encode(), httpx.Headers()
+
+    monkeypatch.setattr(
+        "backend.app.services.subscriptions.fetch_subscription", fake_fetch
+    )
+
+    async def scenario(client: httpx.AsyncClient):
+        csrf = await login(client)
+        sub = await client.post(
+            "/api/subscriptions",
+            headers={"X-CSRF-Token": csrf},
+            json={"name": "TempSub", "url": "https://temp.example/sub"},
+        )
+        assert sub.status_code == 201
+        sub_id = sub.json()["id"]
+
+        original_prepare = sys.modules[
+            "backend.app.api.subscriptions"
+        ].prepare_subscription_sync
+
+        async def prepare_and_delete(subscription, settings, secret_box):
+            result = await original_prepare(subscription, settings, secret_box)
+            if subscription.id == sub_id:
+                await client.delete(
+                    f"/api/subscriptions/{sub_id}",
+                    headers={"X-CSRF-Token": csrf},
+                )
+            return result
+
+        monkeypatch.setattr(
+            "backend.app.api.subscriptions.prepare_subscription_sync",
+            prepare_and_delete,
+        )
+
+        sync_all = await client.post(
+            "/api/subscriptions/sync-all",
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert sync_all.status_code == 200
+        data = sync_all.json()
+        assert data["healthy"] == 1
+        assert data["node_count"] == 1
+
+    asyncio.run(with_client(app, scenario))
+
+
+def test_refresh_profile_sources_propagates_unrecorded_failures(tmp_path, monkeypatch):
+    app = create_app(settings_for(tmp_path))
+
+    async def scenario(client: httpx.AsyncClient):
+        runtime = app.state.runtime
+
+        import backend.app.services.profiles as prof_mod
+
+        async def fail_persist(*args, **kwargs):
+            raise RuntimeError("Database completely crashed")
+
+        monkeypatch.setattr(prof_mod, "persist_subscription_syncs", fail_persist)
+
+        from sqlalchemy import select
+
+        from backend.app.models import Profile
+
+        async with runtime.database.sessions() as s:
+            p = (await s.scalars(select(Profile))).first()
+            pid = p.id
+
+        with pytest.raises(RuntimeError, match="Database completely crashed"):
+            await prof_mod.refresh_profile_sources(
+                runtime, pid, auto_refresh_enabled=True
+            )
 
     asyncio.run(with_client(app, scenario))

@@ -1,7 +1,9 @@
 import type {
   AuthSession,
+  BatchSyncResponse,
   ClientDevice,
   DashboardSummary,
+  DeletedCountResponse,
   Profile,
   ProfileInput,
   ProfileUpdateInput,
@@ -86,6 +88,10 @@ export const api = {
       `/api/subscriptions/${id}/sync`,
       { method: "POST" },
     ),
+  syncAllSubscriptions: () =>
+    request<BatchSyncResponse>("/api/subscriptions/sync-all", {
+      method: "POST",
+    }),
   profiles: () => request<Profile[]>("/api/profiles"),
   createProfile: (input: ProfileInput) =>
     request<Profile>("/api/profiles", {
@@ -107,7 +113,17 @@ export const api = {
       body: JSON.stringify({ node_ids: nodeIds }),
     }),
   requestLogs: () => request<RequestLog[]>("/api/request-logs?limit=200"),
+  clearRequestLogs: () =>
+    request<DeletedCountResponse>("/api/request-logs", {
+      method: "DELETE",
+    }),
   devices: () => request<ClientDevice[]>("/api/devices?limit=200"),
+  clearDevices: () =>
+    request<DeletedCountResponse>("/api/devices", {
+      method: "DELETE",
+    }),
+  deleteDevice: (id: string) =>
+    request<void>(`/api/devices/${id}`, { method: "DELETE" }),
   settings: () => request<RelaySettings>("/api/settings"),
   updateSettings: (input: RelaySettingsInput) =>
     request<RelaySettings>("/api/settings", {

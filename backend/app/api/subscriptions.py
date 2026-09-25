@@ -1,21 +1,29 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import AsyncExitStack
 from urllib.parse import urlsplit
 
 import httpx
 from fastapi import APIRouter, HTTPException, Response, status
 from sqlalchemy import func, select
 
-from ..dependencies import SecretBoxDep, SessionDep, SettingsDep
+from ..dependencies import RuntimeDep, SecretBoxDep, SessionDep, SettingsDep
 from ..models import Profile, ProfileSubscription, Subscription, SubscriptionUsage
 from ..schemas import (
+    BatchSyncResponse,
     SubscriptionCreate,
     SubscriptionResponse,
     SubscriptionUpdate,
     SyncResponse,
 )
 from ..services.presenters import subscription_response
-from ..services.subscriptions import sync_subscription
+from ..services.subscriptions import (
+    PreparedSubscriptionSync,
+    persist_subscription_syncs,
+    prepare_subscription_sync,
+    sync_subscription,
+)
 
 router = APIRouter(prefix="/subscriptions", tags=["subscriptions"])
 
@@ -138,28 +146,86 @@ async def delete_subscription(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.post("/sync-all")
+async def sync_all_sources(
+    session: SessionDep,
+    settings: SettingsDep,
+    secret_box: SecretBoxDep,
+    runtime: RuntimeDep,
+) -> BatchSyncResponse:
+    subscriptions = (
+        await session.scalars(
+            select(Subscription)
+            .where(Subscription.enabled.is_(True))
+            .order_by(Subscription.priority)
+        )
+    ).all()
+    if not subscriptions:
+        return BatchSyncResponse(total=0, healthy=0, errors=0, node_count=0)
+
+    semaphore = asyncio.Semaphore(8)
+
+    async def prepare(subscription: Subscription):
+        async with semaphore:
+            try:
+                return await prepare_subscription_sync(
+                    subscription, settings, secret_box
+                )
+            except Exception as exc:
+                return exc
+
+    results = await asyncio.gather(
+        *(prepare(s) for s in subscriptions),
+        return_exceptions=True,
+    )
+
+    prepared_syncs: list[PreparedSubscriptionSync] = []
+    errors: dict[str, Exception] = {}
+    for subscription, result in zip(subscriptions, results, strict=True):
+        if isinstance(result, Exception):
+            errors[subscription.id] = result
+        else:
+            prepared_syncs.append(result)
+
+    all_ids = sorted({p.subscription_id for p in prepared_syncs} | set(errors))
+    async with AsyncExitStack() as stack:
+        for sid in all_ids:
+            await stack.enter_async_context(runtime.subscription_locks.acquire(sid))
+        healthy_count, node_count = await persist_subscription_syncs(
+            session, prepared_syncs, errors, secret_box
+        )
+    return BatchSyncResponse(
+        total=len(subscriptions),
+        healthy=healthy_count,
+        errors=len(errors),
+        node_count=node_count,
+    )
+
+
 @router.post("/{subscription_id}/sync")
 async def sync_source(
     subscription_id: str,
     session: SessionDep,
     settings: SettingsDep,
     secret_box: SecretBoxDep,
+    runtime: RuntimeDep,
 ) -> SyncResponse:
-    subscription = await session.get(Subscription, subscription_id)
-    if subscription is None:
-        raise HTTPException(status_code=404, detail="Subscription not found")
-    try:
-        count = await sync_subscription(
-            session,
-            subscription,
-            settings,
-            secret_box,
-        )
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Upstream returned HTTP {exc.response.status_code}",
-        ) from exc
-    except (httpx.HTTPError, ValueError) as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return SyncResponse(status="healthy", node_count=count)
+    async with runtime.subscription_locks.acquire(subscription_id):
+        subscription = await session.get(Subscription, subscription_id)
+        if subscription is None:
+            raise HTTPException(status_code=404, detail="Subscription not found")
+        try:
+            count = await sync_subscription(
+                session,
+                subscription,
+                settings,
+                secret_box,
+            )
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Upstream returned HTTP {exc.response.status_code}",
+            ) from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return SyncResponse(status="healthy", node_count=count)

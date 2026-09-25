@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime
 from typing import TypeAlias
 
@@ -20,12 +21,13 @@ from ..models import (
 from ..runtime import AppRuntime
 from .observability import record_subscription_request
 from .subscriptions import (
-    PreparedSubscriptionSync,
     encode_subscription,
     persist_subscription_syncs,
     prepare_subscription_sync,
 )
 from .traffic import profile_traffic_summary, subscription_userinfo_header
+
+logger = logging.getLogger(__name__)
 
 ProfileNodeRow: TypeAlias = tuple[
     Node,
@@ -96,9 +98,9 @@ async def refresh_profile_sources(
         return
 
     requested_at = datetime.now(UTC)
-    # Only one request schedules refreshes at a time. A request that waited for
-    # a newer completed refresh can reuse it instead of creating a stampede.
-    async with runtime.refresh_lock:
+    # Synchronize refreshes per profile so requests to different profiles
+    # run concurrently without head-of-line blocking.
+    async with runtime.profile_locks.acquire(profile_id):
         async with runtime.database.sessions() as session:
             subscriptions = (
                 await session.scalars(
@@ -126,42 +128,81 @@ async def refresh_profile_sources(
         if not subscriptions_to_refresh:
             return
 
-        # Network waits dominate synchronization, so fetch independent sources
-        # concurrently. The database update remains one atomic transaction.
+        # Coordinate refreshes per subscription so shared subscriptions across
+        # profiles do not race during sync and node persistence.
         semaphore = asyncio.Semaphore(8)
 
-        async def prepare(
-            subscription: Subscription,
-        ) -> PreparedSubscriptionSync:
-            async with semaphore:
-                return await prepare_subscription_sync(
-                    subscription,
-                    runtime.settings,
-                    runtime.secret_box,
-                )
+        async def refresh_subscription(subscription: Subscription) -> None:
+            sub_id = subscription.id
+            async with semaphore, runtime.subscription_locks.acquire(sub_id):
+                async with runtime.database.sessions() as sub_session:
+                    current_sub = await sub_session.get(Subscription, sub_id)
+                    if current_sub is None or not current_sub.enabled:
+                        return
+                    if _was_refreshed_since(current_sub.last_sync_at, requested_at):
+                        return
+                    try:
+                        prepared = await prepare_subscription_sync(
+                            current_sub,
+                            runtime.settings,
+                            runtime.secret_box,
+                        )
+                        await persist_subscription_syncs(
+                            sub_session,
+                            [prepared],
+                            {},
+                            runtime.secret_box,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to sync subscription %s: %s", sub_id, exc
+                        )
+                        try:
+                            await sub_session.rollback()
+                            await persist_subscription_syncs(
+                                sub_session,
+                                [],
+                                {sub_id: exc},
+                                runtime.secret_box,
+                            )
+                        except Exception as persist_err:
+                            logger.exception(
+                                "Failed to record error for subscription %s: %s",
+                                sub_id,
+                                persist_err,
+                            )
+                            try:
+                                async with runtime.database.sessions() as err_session:
+                                    await persist_subscription_syncs(
+                                        err_session,
+                                        [],
+                                        {sub_id: exc},
+                                        runtime.secret_box,
+                                    )
+                            except Exception as fallback_err:
+                                logger.exception(
+                                    "Failed to persist error in fallback for %s",
+                                    sub_id,
+                                )
+                                raise fallback_err from exc
 
         results = await asyncio.gather(
-            *(prepare(subscription) for subscription in subscriptions_to_refresh),
+            *(refresh_subscription(s) for s in subscriptions_to_refresh),
             return_exceptions=True,
         )
-        prepared_syncs: list[PreparedSubscriptionSync] = []
-        errors: dict[str, Exception] = {}
-        for subscription, result in zip(
-            subscriptions_to_refresh,
-            results,
-            strict=True,
-        ):
-            if isinstance(result, Exception):
-                errors[subscription.id] = result
-            else:
-                prepared_syncs.append(result)
-
-        async with runtime.database.sessions() as session:
-            await persist_subscription_syncs(
-                session,
-                prepared_syncs,
-                errors,
-                runtime.secret_box,
+        failures = [res for res in results if isinstance(res, Exception)]
+        if failures:
+            for failure in failures:
+                logger.error(
+                    "Subscription refresh failed unexpectedly: %s",
+                    failure,
+                    exc_info=failure,
+                )
+            if len(failures) == 1:
+                raise failures[0]
+            raise ExceptionGroup(
+                "Subscription refreshes failed and errors could not be recorded",
+                failures,
             )
 
 
