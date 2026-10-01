@@ -24,6 +24,7 @@ from .subscriptions import (
     encode_subscription,
     persist_subscription_syncs,
     prepare_subscription_sync,
+    proxy_urls_for_subscriptions,
 )
 from .traffic import profile_traffic_summary, subscription_userinfo_header
 
@@ -125,6 +126,17 @@ async def refresh_profile_sources(
         ]
         if not subscriptions_to_refresh:
             return
+        expected_versions = {
+            subscription.id: subscription.updated_at
+            for subscription in subscriptions_to_refresh
+        }
+
+        async with runtime.database.sessions() as session:
+            proxy_urls = await proxy_urls_for_subscriptions(
+                session,
+                [subscription.id for subscription in subscriptions_to_refresh],
+                runtime.secret_box,
+            )
 
         # Network waits dominate synchronization, so fetch independent sources
         # concurrently. The database update remains one atomic transaction.
@@ -138,6 +150,7 @@ async def refresh_profile_sources(
                     subscription,
                     runtime.settings,
                     runtime.secret_box,
+                    proxy_urls.get(subscription.id),
                 )
 
         results = await asyncio.gather(
@@ -162,6 +175,7 @@ async def refresh_profile_sources(
                 prepared_syncs,
                 errors,
                 runtime.secret_box,
+                expected_versions,
             )
 
 

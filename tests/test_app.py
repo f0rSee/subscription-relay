@@ -1,15 +1,19 @@
 import asyncio
 import base64
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
+import pytest
 
 from backend.app.config import Settings, _normalize_database_url
 from backend.app.main import create_app
 from backend.app.models import SubscriptionUsage
+from backend.app.services.proxies import validate_proxy_url
 from backend.app.services.subscriptions import (
     UPSTREAM_HEADERS,
     UPSTREAM_USER_AGENT,
+    fetch_subscription,
     parse_subscription,
     parse_subscription_userinfo,
 )
@@ -117,6 +121,359 @@ def test_normalizes_neon_url_for_asyncpg():
         "postgresql://user:pass@host/db?sslmode=require&channel_binding=require"
     )
     assert normalized == "postgresql+asyncpg://user:pass@host/db?ssl=require"
+
+
+def test_proxy_url_validation():
+    for url in (
+        "http://proxy.example:8080",
+        "https://user:password@proxy.example:8443",
+    ):
+        validate_proxy_url(url)
+
+    for url in (
+        "socks5://proxy.example:1080",
+        "http://",
+        "http://proxy.example:99999",
+        "http://proxy.example:8080/path",
+        "http://proxy.example:8080?token=secret",
+        "http://proxy host:8080",
+    ):
+        with pytest.raises(ValueError, match="Proxy URL") as error:
+            validate_proxy_url(url)
+        assert "secret" not in str(error.value)
+
+
+def test_proxy_assignment_controls_manual_and_auto_refresh(tmp_path):
+    requests = []
+    body = b"vless://id@server.example:443#FromProxy\n"
+
+    async def proxy_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        request = await reader.readuntil(b"\r\n\r\n")
+        requests.append(request.decode("ascii"))
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: "
+            + str(len(body)).encode("ascii")
+            + b"\r\nConnection: close\r\n\r\n"
+            + body
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async def scenario():
+        server = await asyncio.start_server(proxy_handler, "127.0.0.1", 0)
+        try:
+            port = server.sockets[0].getsockname()[1]
+            settings = replace(
+                settings_for(tmp_path),
+                upstream_url="http://provider.example/sub",
+            )
+            app = create_app(settings)
+
+            async def verify(client: httpx.AsyncClient):
+                csrf = await login(client)
+                source = (await client.get("/api/subscriptions")).json()[0]
+                assert source["proxy_id"] is None
+                invalid = await client.post(
+                    "/api/proxies",
+                    headers={"X-CSRF-Token": csrf},
+                    json={"name": "Bad", "url": "socks5://proxy.example:1080"},
+                )
+                assert invalid.status_code == 422
+                created = await client.post(
+                    "/api/proxies",
+                    headers={"X-CSRF-Token": csrf},
+                    json={
+                        "name": "Test proxy",
+                        "url": f"http://user:password@127.0.0.1:{port}",
+                    },
+                )
+                assert created.status_code == 201
+                proxy = created.json()
+                assert proxy["url_hint"] == f"http://127.0.0.1:{port}"
+                assert "password" not in str((await client.get("/api/proxies")).json())
+                assigned = await client.patch(
+                    f"/api/subscriptions/{source['id']}",
+                    headers={"X-CSRF-Token": csrf},
+                    json={"proxy_id": proxy["id"]},
+                )
+                assert assigned.status_code == 200
+                assert assigned.json()["proxy_id"] == proxy["id"]
+                synced = await client.post(
+                    f"/api/subscriptions/{source['id']}/sync",
+                    headers={"X-CSRF-Token": csrf},
+                )
+                assert synced.status_code == 200
+                assert synced.json()["node_count"] == 1
+
+                profile = (await client.get("/api/profiles")).json()[0]
+                public = await client.get(profile["url"])
+                assert public.status_code == 200
+                assert base64.b64decode(public.content) == body
+
+                extra = await client.post(
+                    "/api/subscriptions",
+                    headers={"X-CSRF-Token": csrf},
+                    json={
+                        "name": "Extra",
+                        "url": "https://extra.example/sub",
+                        "proxy_id": proxy["id"],
+                    },
+                )
+                assert extra.status_code == 201
+                assert extra.json()["proxy_id"] == proxy["id"]
+
+                updated = await client.patch(
+                    f"/api/proxies/{proxy['id']}",
+                    headers={"X-CSRF-Token": csrf},
+                    json={
+                        "name": "Renamed proxy",
+                        "url": f"http://new-user:new-password@127.0.0.1:{port}",
+                    },
+                )
+                assert updated.status_code == 200
+                assert updated.json()["name"] == "Renamed proxy"
+                assert "new-password" not in str(updated.json())
+                sources = (await client.get("/api/subscriptions")).json()
+                assert all(source["status"] == "never" for source in sources)
+
+                resynced = await client.post(
+                    f"/api/subscriptions/{source['id']}/sync",
+                    headers={"X-CSRF-Token": csrf},
+                )
+                assert resynced.status_code == 200
+
+                removed = await client.delete(
+                    f"/api/proxies/{proxy['id']}",
+                    headers={"X-CSRF-Token": csrf},
+                )
+                assert removed.status_code == 204
+                sources = (await client.get("/api/subscriptions")).json()
+                assert all(source["proxy_id"] is None for source in sources)
+                assert all(source["status"] == "never" for source in sources)
+
+            await with_client(app, verify)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(scenario())
+    assert len(requests) == 3
+    assert all(
+        request.startswith("GET http://provider.example/sub HTTP/1.1\r\n")
+        for request in requests
+    )
+    assert all(UPSTREAM_USER_AGENT in request for request in requests)
+    assert base64.b64encode(b"user:password").decode() in requests[0]
+    assert base64.b64encode(b"new-user:new-password").decode() in requests[2]
+
+
+@pytest.mark.parametrize("route_change", ["edit", "delete", "reassign"])
+def test_auto_refresh_discards_obsolete_proxy_result(
+    tmp_path, monkeypatch, route_change
+):
+    app = create_app(settings_for(tmp_path))
+    started = asyncio.Event()
+    release = asyncio.Event()
+    old_body = b"vless://old@server.example:443#Old\n"
+    new_body = b"vless://new@server.example:443#New\n"
+
+    async def fake_fetch(url, settings, proxy_url=None):
+        if proxy_url == "http://old-proxy.example:8080":
+            started.set()
+            await release.wait()
+            return old_body, httpx.Headers()
+        assert proxy_url == (
+            "http://new-proxy.example:8080" if route_change != "delete" else None
+        )
+        return new_body, httpx.Headers()
+
+    monkeypatch.setattr(
+        "backend.app.services.subscriptions.fetch_subscription", fake_fetch
+    )
+
+    async def scenario(client: httpx.AsyncClient):
+        csrf = await login(client)
+        source = (await client.get("/api/subscriptions")).json()[0]
+        profile = (await client.get("/api/profiles")).json()[0]
+        old_proxy = await client.post(
+            "/api/proxies",
+            headers={"X-CSRF-Token": csrf},
+            json={"name": "Old", "url": "http://old-proxy.example:8080"},
+        )
+        assert old_proxy.status_code == 201
+        old_proxy_id = old_proxy.json()["id"]
+        assigned = await client.patch(
+            f"/api/subscriptions/{source['id']}",
+            headers={"X-CSRF-Token": csrf},
+            json={"proxy_id": old_proxy_id},
+        )
+        assert assigned.status_code == 200
+
+        pending = asyncio.create_task(client.get(profile["url"]))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        try:
+            if route_change == "edit":
+                changed = await client.patch(
+                    f"/api/proxies/{old_proxy_id}",
+                    headers={"X-CSRF-Token": csrf},
+                    json={"url": "http://new-proxy.example:8080"},
+                )
+            elif route_change == "delete":
+                changed = await client.delete(
+                    f"/api/proxies/{old_proxy_id}",
+                    headers={"X-CSRF-Token": csrf},
+                )
+            else:
+                new_proxy = await client.post(
+                    "/api/proxies",
+                    headers={"X-CSRF-Token": csrf},
+                    json={"name": "New", "url": "http://new-proxy.example:8080"},
+                )
+                assert new_proxy.status_code == 201
+                changed = await client.patch(
+                    f"/api/subscriptions/{source['id']}",
+                    headers={"X-CSRF-Token": csrf},
+                    json={"proxy_id": new_proxy.json()["id"]},
+                )
+            assert changed.status_code in {200, 204}
+        finally:
+            release.set()
+
+        stale_response = await pending
+        assert stale_response.status_code == 502
+        source = (await client.get("/api/subscriptions")).json()[0]
+        assert source["status"] == "never"
+        assert source["last_sync_at"] is None
+        assert (await client.get(f"/api/profiles/{profile['id']}/nodes")).json() == []
+
+        refreshed = await client.get(profile["url"])
+        assert refreshed.status_code == 200
+        assert base64.b64decode(refreshed.content) == new_body
+
+    asyncio.run(with_client(app, scenario))
+
+
+def test_manual_sync_reports_obsolete_proxy_result(tmp_path, monkeypatch):
+    app = create_app(settings_for(tmp_path))
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_fetch(url, settings, proxy_url):
+        assert proxy_url == "http://old-proxy.example:8080"
+        started.set()
+        await release.wait()
+        return b"vless://old@server.example:443#Old\n", httpx.Headers()
+
+    monkeypatch.setattr(
+        "backend.app.services.subscriptions.fetch_subscription", fake_fetch
+    )
+
+    async def scenario(client: httpx.AsyncClient):
+        csrf = await login(client)
+        source = (await client.get("/api/subscriptions")).json()[0]
+        proxy = await client.post(
+            "/api/proxies",
+            headers={"X-CSRF-Token": csrf},
+            json={"name": "Old", "url": "http://old-proxy.example:8080"},
+        )
+        assert proxy.status_code == 201
+        assigned = await client.patch(
+            f"/api/subscriptions/{source['id']}",
+            headers={"X-CSRF-Token": csrf},
+            json={"proxy_id": proxy.json()["id"]},
+        )
+        assert assigned.status_code == 200
+        pending = asyncio.create_task(
+            client.post(
+                f"/api/subscriptions/{source['id']}/sync",
+                headers={"X-CSRF-Token": csrf},
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        try:
+            changed = await client.patch(
+                f"/api/subscriptions/{source['id']}",
+                headers={"X-CSRF-Token": csrf},
+                json={"proxy_id": None},
+            )
+            assert changed.status_code == 200
+        finally:
+            release.set()
+        stale = await pending
+        assert stale.status_code == 409
+        assert "changed during sync" in stale.json()["detail"]
+        source = (await client.get("/api/subscriptions")).json()[0]
+        assert source["status"] == "never"
+        assert source["node_count"] == 0
+
+    asyncio.run(with_client(app, scenario))
+
+
+def test_unassigned_source_ignores_environment_proxy(tmp_path, monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:1")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    body = b"vless://id@server.example:443#Direct\n"
+
+    async def origin_handler(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ):
+        request = await reader.readuntil(b"\r\n\r\n")
+        assert request.startswith(b"GET /sub HTTP/1.1\r\n")
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Length: "
+            + str(len(body)).encode("ascii")
+            + b"\r\nConnection: close\r\n\r\n"
+            + body
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async def scenario():
+        server = await asyncio.start_server(origin_handler, "127.0.0.1", 0)
+        try:
+            port = server.sockets[0].getsockname()[1]
+            fetched, _ = await fetch_subscription(
+                f"http://127.0.0.1:{port}/sub", settings_for(tmp_path)
+            )
+            assert fetched == body
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(scenario())
+
+
+def test_https_source_uses_connect_through_http_proxy(tmp_path):
+    requests = []
+
+    async def proxy_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        requests.append((await reader.readuntil(b"\r\n\r\n")).decode("ascii"))
+        writer.write(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async def scenario():
+        server = await asyncio.start_server(proxy_handler, "127.0.0.1", 0)
+        try:
+            port = server.sockets[0].getsockname()[1]
+            settings = settings_for(tmp_path)
+            with pytest.raises(httpx.ProxyError):
+                await fetch_subscription(
+                    "https://provider.example/sub",
+                    settings,
+                    f"http://127.0.0.1:{port}",
+                )
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(scenario())
+    assert len(requests) == 1
+    assert requests[0].startswith("CONNECT provider.example:443 HTTP/1.1\r\n")
 
 
 def test_health_authentication_and_csrf(tmp_path):
