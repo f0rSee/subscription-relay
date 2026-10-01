@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, HTTPException, Response, status
 from sqlalchemy import select, update
 
@@ -57,15 +59,15 @@ async def update_proxy(
             validate_proxy_url(payload.url)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        proxy.url_ciphertext = secret_box.encrypt(payload.url)
         subscription_ids = select(SubscriptionProxy.subscription_id).where(
             SubscriptionProxy.proxy_id == proxy_id
         )
         await session.execute(
             update(Subscription)
             .where(Subscription.id.in_(subscription_ids))
-            .values(status="never", last_error=None)
+            .values(status="never", last_error=None, updated_at=datetime.now(UTC))
         )
+        proxy.url_ciphertext = secret_box.encrypt(payload.url)
     await session.commit()
     return proxy_response(proxy, secret_box)
 
@@ -81,7 +83,7 @@ async def delete_proxy(proxy_id: str, session: SessionDep) -> Response:
     await session.execute(
         update(Subscription)
         .where(Subscription.id.in_(subscription_ids))
-        .values(status="never", last_error=None)
+        .values(status="never", last_error=None, updated_at=datetime.now(UTC))
     )
     await session.delete(proxy)
     await session.commit()

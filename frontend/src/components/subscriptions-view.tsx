@@ -50,6 +50,7 @@ import {
 interface SubscriptionsViewProps {
   subscriptions: Subscription[]
   proxies: UpstreamProxy[]
+  proxiesError: string
   loading: boolean
   error: string
   onRetry: () => void
@@ -86,7 +87,8 @@ function proxyLabel(proxies: UpstreamProxy[], proxyId: string) {
 function AddSubscriptionDialog({
   onCreate,
   proxies,
-}: Pick<SubscriptionsViewProps, "onCreate" | "proxies">) {
+  proxiesError,
+}: Pick<SubscriptionsViewProps, "onCreate" | "proxies" | "proxiesError">) {
   const [open, setOpen] = useState(false)
   const [name, setName] = useState("")
   const [url, setUrl] = useState("")
@@ -149,7 +151,7 @@ function AddSubscriptionDialog({
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="subscription-proxy">Прокси для обновления</Label>
-              <Select value={proxyId} onValueChange={(value) => setProxyId(value ?? "direct")}>
+              <Select value={proxyId} onValueChange={(value) => setProxyId(value ?? "direct")} disabled={Boolean(proxiesError)}>
                 <SelectTrigger id="subscription-proxy" className="w-full">
                   {proxyLabel(proxies, proxyId)}
                 </SelectTrigger>
@@ -175,7 +177,7 @@ function AddSubscriptionDialog({
 }
 
 export function SubscriptionsView(props: SubscriptionsViewProps) {
-  const { subscriptions, proxies, loading, error, onRetry, onCreate, onToggle, onAssignProxy, onSync, onDelete } = props
+  const { subscriptions, proxies, proxiesError, loading, error, onRetry, onCreate, onToggle, onAssignProxy, onSync, onDelete } = props
   const [pagination, setPagination] = useState<PaginationState>({
     pageIndex: 0,
     pageSize: 10,
@@ -221,7 +223,7 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
             onValueChange={(value) => {
               if (value) void run(row.original.id, () => onAssignProxy(row.original, value === "direct" ? null : value))
             }}
-            disabled={pendingId === row.original.id}
+            disabled={Boolean(proxiesError) || pendingId === row.original.id}
           >
             <SelectTrigger size="sm" className="w-40" aria-label={`Прокси для ${row.original.name}`}>
               {proxyLabel(proxies, row.original.proxy_id ?? "direct")}
@@ -342,7 +344,7 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
         size: 100,
       },
     ],
-    [onAssignProxy, onDelete, onSync, onToggle, pendingId, proxies],
+    [onAssignProxy, onDelete, onSync, onToggle, pendingId, proxies, proxiesError],
   )
 
   const table = useTable({
@@ -365,7 +367,7 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
             Сервис забирает данные по URL и обновляет список серверов для профилей.
           </FrameDescription>
         </div>
-        <AddSubscriptionDialog onCreate={onCreate} proxies={proxies} />
+        <AddSubscriptionDialog onCreate={onCreate} proxies={proxies} proxiesError={proxiesError} />
       </FrameHeader>
       <FramePanel className="p-2!">
         {(error || actionError) && (
@@ -374,6 +376,13 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
             <AlertTitle>Ошибка источника</AlertTitle>
             <AlertDescription>{actionError || error}</AlertDescription>
             {error && <Button type="button" size="sm" variant="outline" onClick={onRetry}>Повторить</Button>}
+          </Alert>
+        )}
+        {proxiesError && (
+          <Alert variant="destructive" className="mb-2">
+            <TriangleAlertIcon aria-hidden="true" />
+            <AlertTitle>Прокси недоступны</AlertTitle>
+            <AlertDescription>{proxiesError}</AlertDescription>
           </Alert>
         )}
         <DataGrid

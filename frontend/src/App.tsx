@@ -104,11 +104,13 @@ export default function App() {
   const [selectedProfileId, setSelectedProfileId] = useState("")
   const [initialError, setInitialError] = useState("")
   const [subscriptionsError, setSubscriptionsError] = useState("")
+  const [proxiesError, setProxiesError] = useState("")
   const [nodesError, setNodesError] = useState("")
   const [logsError, setLogsError] = useState("")
   const [devicesError, setDevicesError] = useState("")
   const [settingsError, setSettingsError] = useState("")
   const [loadingDashboard, setLoadingDashboard] = useState(false)
+  const [loadingProxies, setLoadingProxies] = useState(false)
   const [loadingNodes, setLoadingNodes] = useState(false)
   const [loadingLogs, setLoadingLogs] = useState(false)
   const [loadingDevices, setLoadingDevices] = useState(false)
@@ -118,15 +120,13 @@ export default function App() {
     setLoadingDashboard(true)
     setSubscriptionsError("")
     try {
-      const [nextSummary, nextSubscriptions, nextProfiles, nextProxies] = await Promise.all([
+      const [nextSummary, nextSubscriptions, nextProfiles] = await Promise.all([
         api.dashboard(),
         api.subscriptions(),
         api.profiles(),
-        api.proxies(),
       ])
       setSummary(nextSummary)
       setSubscriptions(nextSubscriptions)
-      setProxies(nextProxies)
       setProfiles(nextProfiles)
       setSelectedProfileId((current) =>
         nextProfiles.some((profile) => profile.id === current)
@@ -142,6 +142,23 @@ export default function App() {
       }
     } finally {
       setLoadingDashboard(false)
+    }
+  }, [])
+
+  const loadProxies = useCallback(async () => {
+    setLoadingProxies(true)
+    setProxiesError("")
+    try {
+      setProxies(await api.proxies())
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 401) {
+        setCsrfToken(undefined)
+        setSession({ authenticated: false, admin_configured: true })
+      } else {
+        setProxiesError(errorMessage(reason))
+      }
+    } finally {
+      setLoadingProxies(false)
     }
   }, [])
 
@@ -199,10 +216,11 @@ export default function App() {
         if (nextSession.authenticated) {
           setCsrfToken(nextSession.csrf_token)
           void loadDashboard()
+          void loadProxies()
         }
       })
       .catch((reason) => setInitialError(errorMessage(reason)))
-  }, [loadDashboard])
+  }, [loadDashboard, loadProxies])
 
   useEffect(() => {
     if (!session?.authenticated || !selectedProfileId) {
@@ -222,7 +240,7 @@ export default function App() {
     if (!nextSession.authenticated) throw new Error("Сервер не создал сессию")
     setCsrfToken(nextSession.csrf_token)
     setSession(nextSession)
-    await loadDashboard()
+    await Promise.all([loadDashboard(), loadProxies()])
   }
 
   async function logout() {
@@ -232,6 +250,7 @@ export default function App() {
     setSummary(null)
     setSubscriptions([])
     setProxies([])
+    setProxiesError("")
     setProfiles([])
     setNodes([])
     setRequestLogs([])
@@ -260,19 +279,19 @@ export default function App() {
   async function createProxy(input: UpstreamProxyInput) {
     await api.createProxy(input)
     toast.success("Прокси добавлен")
-    await loadDashboard()
+    await loadProxies()
   }
 
   async function updateProxy(proxy: UpstreamProxy, input: Partial<UpstreamProxyInput>) {
     await api.updateProxy(proxy.id, input)
     toast.success("Прокси обновлён")
-    await loadDashboard()
+    await Promise.all([loadProxies(), loadDashboard()])
   }
 
   async function deleteProxy(proxy: UpstreamProxy) {
     await api.deleteProxy(proxy.id)
     toast.success("Прокси удалён")
-    await loadDashboard()
+    await Promise.all([loadProxies(), loadDashboard()])
   }
 
   async function syncSubscription(subscription: Subscription) {
@@ -420,6 +439,7 @@ export default function App() {
               <SubscriptionsView
                 subscriptions={subscriptions}
                 proxies={proxies}
+                proxiesError={proxiesError}
                 loading={loadingDashboard}
                 error={subscriptionsError}
                 onRetry={() => void loadDashboard()}
@@ -434,9 +454,9 @@ export default function App() {
               <ProxiesView
                 proxies={proxies}
                 subscriptions={subscriptions}
-                loading={loadingDashboard}
-                error={subscriptionsError}
-                onRetry={() => void loadDashboard()}
+                loading={loadingProxies}
+                error={proxiesError}
+                onRetry={() => void loadProxies()}
                 onCreate={createProxy}
                 onUpdate={updateProxy}
                 onDelete={deleteProxy}

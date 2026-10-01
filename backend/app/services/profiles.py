@@ -126,6 +126,10 @@ async def refresh_profile_sources(
         ]
         if not subscriptions_to_refresh:
             return
+        expected_versions = {
+            subscription.id: subscription.updated_at
+            for subscription in subscriptions_to_refresh
+        }
 
         async with runtime.database.sessions() as session:
             proxy_urls = await proxy_urls_for_subscriptions(
@@ -171,6 +175,7 @@ async def refresh_profile_sources(
                 prepared_syncs,
                 errors,
                 runtime.secret_box,
+                expected_versions,
             )
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
 import httpx
@@ -22,7 +23,11 @@ from ..schemas import (
     SyncResponse,
 )
 from ..services.presenters import subscription_response
-from ..services.subscriptions import proxy_urls_for_subscriptions, sync_subscription
+from ..services.subscriptions import (
+    StaleSubscriptionSync,
+    proxy_urls_for_subscriptions,
+    sync_subscription,
+)
 
 router = APIRouter(prefix="/subscriptions", tags=["subscriptions"])
 
@@ -136,6 +141,8 @@ async def update_subscription(
             and await session.get(UpstreamProxy, payload.proxy_id) is None
         ):
             raise HTTPException(status_code=422, detail="Unknown proxy")
+        subscription.updated_at = datetime.now(UTC)
+        await session.flush()
         if proxy_link is not None and payload.proxy_id is None:
             await session.delete(proxy_link)
             proxy_link = None
@@ -203,6 +210,8 @@ async def sync_source(
             secret_box,
             proxy_urls.get(subscription_id),
         )
+    except StaleSubscriptionSync as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except httpx.HTTPStatusError as exc:
         raise HTTPException(
             status_code=502,

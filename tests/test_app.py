@@ -268,6 +268,148 @@ def test_proxy_assignment_controls_manual_and_auto_refresh(tmp_path):
     assert base64.b64encode(b"new-user:new-password").decode() in requests[2]
 
 
+@pytest.mark.parametrize("route_change", ["edit", "delete", "reassign"])
+def test_auto_refresh_discards_obsolete_proxy_result(
+    tmp_path, monkeypatch, route_change
+):
+    app = create_app(settings_for(tmp_path))
+    started = asyncio.Event()
+    release = asyncio.Event()
+    old_body = b"vless://old@server.example:443#Old\n"
+    new_body = b"vless://new@server.example:443#New\n"
+
+    async def fake_fetch(url, settings, proxy_url=None):
+        if proxy_url == "http://old-proxy.example:8080":
+            started.set()
+            await release.wait()
+            return old_body, httpx.Headers()
+        assert proxy_url == (
+            "http://new-proxy.example:8080" if route_change != "delete" else None
+        )
+        return new_body, httpx.Headers()
+
+    monkeypatch.setattr(
+        "backend.app.services.subscriptions.fetch_subscription", fake_fetch
+    )
+
+    async def scenario(client: httpx.AsyncClient):
+        csrf = await login(client)
+        source = (await client.get("/api/subscriptions")).json()[0]
+        profile = (await client.get("/api/profiles")).json()[0]
+        old_proxy = await client.post(
+            "/api/proxies",
+            headers={"X-CSRF-Token": csrf},
+            json={"name": "Old", "url": "http://old-proxy.example:8080"},
+        )
+        assert old_proxy.status_code == 201
+        old_proxy_id = old_proxy.json()["id"]
+        assigned = await client.patch(
+            f"/api/subscriptions/{source['id']}",
+            headers={"X-CSRF-Token": csrf},
+            json={"proxy_id": old_proxy_id},
+        )
+        assert assigned.status_code == 200
+
+        pending = asyncio.create_task(client.get(profile["url"]))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        try:
+            if route_change == "edit":
+                changed = await client.patch(
+                    f"/api/proxies/{old_proxy_id}",
+                    headers={"X-CSRF-Token": csrf},
+                    json={"url": "http://new-proxy.example:8080"},
+                )
+            elif route_change == "delete":
+                changed = await client.delete(
+                    f"/api/proxies/{old_proxy_id}",
+                    headers={"X-CSRF-Token": csrf},
+                )
+            else:
+                new_proxy = await client.post(
+                    "/api/proxies",
+                    headers={"X-CSRF-Token": csrf},
+                    json={"name": "New", "url": "http://new-proxy.example:8080"},
+                )
+                assert new_proxy.status_code == 201
+                changed = await client.patch(
+                    f"/api/subscriptions/{source['id']}",
+                    headers={"X-CSRF-Token": csrf},
+                    json={"proxy_id": new_proxy.json()["id"]},
+                )
+            assert changed.status_code in {200, 204}
+        finally:
+            release.set()
+
+        stale_response = await pending
+        assert stale_response.status_code == 502
+        source = (await client.get("/api/subscriptions")).json()[0]
+        assert source["status"] == "never"
+        assert source["last_sync_at"] is None
+        assert (await client.get(f"/api/profiles/{profile['id']}/nodes")).json() == []
+
+        refreshed = await client.get(profile["url"])
+        assert refreshed.status_code == 200
+        assert base64.b64decode(refreshed.content) == new_body
+
+    asyncio.run(with_client(app, scenario))
+
+
+def test_manual_sync_reports_obsolete_proxy_result(tmp_path, monkeypatch):
+    app = create_app(settings_for(tmp_path))
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_fetch(url, settings, proxy_url):
+        assert proxy_url == "http://old-proxy.example:8080"
+        started.set()
+        await release.wait()
+        return b"vless://old@server.example:443#Old\n", httpx.Headers()
+
+    monkeypatch.setattr(
+        "backend.app.services.subscriptions.fetch_subscription", fake_fetch
+    )
+
+    async def scenario(client: httpx.AsyncClient):
+        csrf = await login(client)
+        source = (await client.get("/api/subscriptions")).json()[0]
+        proxy = await client.post(
+            "/api/proxies",
+            headers={"X-CSRF-Token": csrf},
+            json={"name": "Old", "url": "http://old-proxy.example:8080"},
+        )
+        assert proxy.status_code == 201
+        assigned = await client.patch(
+            f"/api/subscriptions/{source['id']}",
+            headers={"X-CSRF-Token": csrf},
+            json={"proxy_id": proxy.json()["id"]},
+        )
+        assert assigned.status_code == 200
+        pending = asyncio.create_task(
+            client.post(
+                f"/api/subscriptions/{source['id']}/sync",
+                headers={"X-CSRF-Token": csrf},
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        try:
+            changed = await client.patch(
+                f"/api/subscriptions/{source['id']}",
+                headers={"X-CSRF-Token": csrf},
+                json={"proxy_id": None},
+            )
+            assert changed.status_code == 200
+        finally:
+            release.set()
+        stale = await pending
+        assert stale.status_code == 409
+        assert "changed during sync" in stale.json()["detail"]
+        source = (await client.get("/api/subscriptions")).json()[0]
+        assert source["status"] == "never"
+        assert source["node_count"] == 0
+
+    asyncio.run(with_client(app, scenario))
+
+
 def test_unassigned_source_ignores_environment_proxy(tmp_path, monkeypatch):
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
     monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:1")

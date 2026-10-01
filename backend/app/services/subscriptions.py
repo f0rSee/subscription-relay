@@ -9,7 +9,7 @@ from decimal import Decimal, InvalidOperation
 from urllib.parse import unquote, urlsplit
 
 import httpx
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import Settings
@@ -43,6 +43,10 @@ UPSTREAM_HEADERS = {
     "X-Device-Model": "iPhone 17 Pro Max",
 }
 MAX_TRAFFIC_VALUE = 2**63 - 1
+
+
+class StaleSubscriptionSync(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -249,12 +253,45 @@ async def persist_subscription_syncs(
     prepared_syncs: list[PreparedSubscriptionSync],
     errors: dict[str, Exception],
     secret_box: SecretBox,
-) -> None:
+    expected_versions: dict[str, datetime] | None = None,
+) -> set[str]:
     subscription_ids = {prepared.subscription_id for prepared in prepared_syncs} | set(
         errors
     )
     if not subscription_ids:
-        return
+        return set()
+
+    if expected_versions is not None:
+        current_ids: set[str] = set()
+        for subscription_id in sorted(subscription_ids):
+            expected = expected_versions[subscription_id]
+            # This conditional write locks the source until commit. Route changes
+            # update the same row before changing proxy links or credentials.
+            result = await session.execute(
+                update(Subscription)
+                .where(
+                    Subscription.id == subscription_id,
+                    Subscription.updated_at == expected,
+                )
+                .values(updated_at=Subscription.updated_at)
+                .execution_options(synchronize_session=False)
+            )
+            if result.rowcount:
+                current_ids.add(subscription_id)
+        prepared_syncs = [
+            prepared
+            for prepared in prepared_syncs
+            if prepared.subscription_id in current_ids
+        ]
+        errors = {
+            subscription_id: error
+            for subscription_id, error in errors.items()
+            if subscription_id in current_ids
+        }
+        subscription_ids = current_ids
+        if not subscription_ids:
+            await session.commit()
+            return set()
 
     subscriptions = {
         subscription.id: subscription
@@ -369,6 +406,7 @@ async def persist_subscription_syncs(
             subscription.last_error = str(error)[:1000]
 
     await session.commit()
+    return subscription_ids
 
 
 async def sync_subscription(
@@ -379,6 +417,7 @@ async def sync_subscription(
     proxy_url: str | None = None,
 ) -> int:
     subscription_id = subscription.id
+    expected_version = subscription.updated_at
     try:
         prepared = await prepare_subscription_sync(
             subscription,
@@ -386,8 +425,14 @@ async def sync_subscription(
             secret_box,
             proxy_url,
         )
-        await persist_subscription_syncs(session, [prepared], {}, secret_box)
+        persisted_ids = await persist_subscription_syncs(
+            session, [prepared], {}, secret_box, {subscription_id: expected_version}
+        )
+        if subscription_id not in persisted_ids:
+            raise StaleSubscriptionSync("Subscription changed during sync; retry")
         return len(prepared.nodes)
+    except StaleSubscriptionSync:
+        raise
     except Exception as exc:
         await session.rollback()
         await persist_subscription_syncs(
@@ -395,5 +440,6 @@ async def sync_subscription(
             [],
             {subscription_id: exc},
             secret_box,
+            {subscription_id: expected_version},
         )
         raise
