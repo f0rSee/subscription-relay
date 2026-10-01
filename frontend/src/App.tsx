@@ -13,6 +13,8 @@ import type {
   RequestLog,
   Subscription,
   SubscriptionInput,
+  UpstreamProxy,
+  UpstreamProxyInput,
 } from "@/api/types"
 import {
   DashboardSidebar,
@@ -22,6 +24,7 @@ import { DevicesView } from "@/components/devices-view"
 import { LoginView } from "@/components/login-view"
 import { NodeOrderView } from "@/components/node-order-view"
 import { ProfilesView } from "@/components/profiles-view"
+import { ProxiesView } from "@/components/proxies-view"
 import { RequestLogsView } from "@/components/request-logs-view"
 import { Alert, AlertDescription, AlertTitle } from "@/components/reui/alert"
 import { Frame, FramePanel } from "@/components/reui/frame"
@@ -57,6 +60,10 @@ const viewCopy: Record<DashboardView, { title: string; description: string }> = 
     title: "Источники",
     description: "Добавляйте и синхронизируйте подписки без изменения окружения.",
   },
+  proxies: {
+    title: "Прокси",
+    description: "Управляйте прокси для загрузки отдельных источников.",
+  },
   profiles: {
     title: "Профили",
     description: "Собирайте отдельные ссылки для устройств и сценариев подключения.",
@@ -88,6 +95,7 @@ export default function App() {
   const [session, setSession] = useState<AuthSession | null>(null)
   const [summary, setSummary] = useState<DashboardSummary | null>(null)
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([])
+  const [proxies, setProxies] = useState<UpstreamProxy[]>([])
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [nodes, setNodes] = useState<ProfileNode[]>([])
   const [requestLogs, setRequestLogs] = useState<RequestLog[]>([])
@@ -110,13 +118,15 @@ export default function App() {
     setLoadingDashboard(true)
     setSubscriptionsError("")
     try {
-      const [nextSummary, nextSubscriptions, nextProfiles] = await Promise.all([
+      const [nextSummary, nextSubscriptions, nextProfiles, nextProxies] = await Promise.all([
         api.dashboard(),
         api.subscriptions(),
         api.profiles(),
+        api.proxies(),
       ])
       setSummary(nextSummary)
       setSubscriptions(nextSubscriptions)
+      setProxies(nextProxies)
       setProfiles(nextProfiles)
       setSelectedProfileId((current) =>
         nextProfiles.some((profile) => profile.id === current)
@@ -221,6 +231,7 @@ export default function App() {
     setSession({ authenticated: false, admin_configured: true })
     setSummary(null)
     setSubscriptions([])
+    setProxies([])
     setProfiles([])
     setNodes([])
     setRequestLogs([])
@@ -237,6 +248,30 @@ export default function App() {
   async function toggleSubscription(subscription: Subscription, enabled: boolean) {
     await api.updateSubscription(subscription.id, { enabled })
     toast.success(enabled ? "Источник включён" : "Источник выключен")
+    await loadDashboard()
+  }
+
+  async function assignSubscriptionProxy(subscription: Subscription, proxyId: string | null) {
+    await api.updateSubscription(subscription.id, { proxy_id: proxyId })
+    toast.success(proxyId ? "Прокси назначен" : "Источник обновляется напрямую")
+    await loadDashboard()
+  }
+
+  async function createProxy(input: UpstreamProxyInput) {
+    await api.createProxy(input)
+    toast.success("Прокси добавлен")
+    await loadDashboard()
+  }
+
+  async function updateProxy(proxy: UpstreamProxy, input: Partial<UpstreamProxyInput>) {
+    await api.updateProxy(proxy.id, input)
+    toast.success("Прокси обновлён")
+    await loadDashboard()
+  }
+
+  async function deleteProxy(proxy: UpstreamProxy) {
+    await api.deleteProxy(proxy.id)
+    toast.success("Прокси удалён")
     await loadDashboard()
   }
 
@@ -384,13 +419,27 @@ export default function App() {
             {activeView === "subscriptions" && (
               <SubscriptionsView
                 subscriptions={subscriptions}
+                proxies={proxies}
                 loading={loadingDashboard}
                 error={subscriptionsError}
                 onRetry={() => void loadDashboard()}
                 onCreate={createSubscription}
                 onToggle={toggleSubscription}
+                onAssignProxy={assignSubscriptionProxy}
                 onSync={syncSubscription}
                 onDelete={deleteSubscription}
+              />
+            )}
+            {activeView === "proxies" && (
+              <ProxiesView
+                proxies={proxies}
+                subscriptions={subscriptions}
+                loading={loadingDashboard}
+                error={subscriptionsError}
+                onRetry={() => void loadDashboard()}
+                onCreate={createProxy}
+                onUpdate={updateProxy}
+                onDelete={deleteProxy}
               />
             )}
             {activeView === "profiles" && (

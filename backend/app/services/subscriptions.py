@@ -13,7 +13,13 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import Settings
-from ..models import Node, Subscription, SubscriptionUsage
+from ..models import (
+    Node,
+    Subscription,
+    SubscriptionProxy,
+    SubscriptionUsage,
+    UpstreamProxy,
+)
 from ..security import SecretBox
 
 SUPPORTED_PROTOCOLS = (
@@ -176,9 +182,16 @@ def encode_subscription(uris: list[str]) -> bytes:
 async def fetch_subscription(
     url: str,
     settings: Settings,
+    proxy_url: str | None = None,
 ) -> tuple[bytes, httpx.Headers]:
     timeout = httpx.Timeout(settings.timeout_seconds)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=True,
+        proxy=proxy_url,
+        # Direct sources must not inherit HTTP_PROXY.
+        trust_env=proxy_url is not None,
+    ) as client:
         async with client.stream("GET", url, headers=UPSTREAM_HEADERS) as response:
             response.raise_for_status()
             body = bytearray()
@@ -193,9 +206,13 @@ async def prepare_subscription_sync(
     subscription: Subscription,
     settings: Settings,
     secret_box: SecretBox,
+    proxy_url: str | None = None,
 ) -> PreparedSubscriptionSync:
     url = secret_box.decrypt(subscription.url_ciphertext)
-    body, headers = await fetch_subscription(url, settings)
+    if proxy_url is None:
+        body, headers = await fetch_subscription(url, settings)
+    else:
+        body, headers = await fetch_subscription(url, settings, proxy_url)
     parsed_nodes = parse_subscription(body)
     if not parsed_nodes:
         raise ValueError("Upstream response does not contain supported nodes")
@@ -205,6 +222,26 @@ async def prepare_subscription_sync(
         usage=parse_subscription_userinfo(headers.get("subscription-userinfo")),
         synced_at=datetime.now(UTC),
     )
+
+
+async def proxy_urls_for_subscriptions(
+    session: AsyncSession,
+    subscription_ids: list[str],
+    secret_box: SecretBox,
+) -> dict[str, str]:
+    if not subscription_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(SubscriptionProxy.subscription_id, UpstreamProxy.url_ciphertext)
+            .join(UpstreamProxy, UpstreamProxy.id == SubscriptionProxy.proxy_id)
+            .where(SubscriptionProxy.subscription_id.in_(subscription_ids))
+        )
+    ).all()
+    return {
+        subscription_id: secret_box.decrypt(url_ciphertext)
+        for subscription_id, url_ciphertext in rows
+    }
 
 
 async def persist_subscription_syncs(
@@ -339,6 +376,7 @@ async def sync_subscription(
     subscription: Subscription,
     settings: Settings,
     secret_box: SecretBox,
+    proxy_url: str | None = None,
 ) -> int:
     subscription_id = subscription.id
     try:
@@ -346,6 +384,7 @@ async def sync_subscription(
             subscription,
             settings,
             secret_box,
+            proxy_url,
         )
         await persist_subscription_syncs(session, [prepared], {}, secret_box)
         return len(prepared.nodes)

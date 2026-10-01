@@ -11,6 +11,8 @@ import type {
   RequestLog,
   Subscription,
   SubscriptionInput,
+  UpstreamProxy,
+  UpstreamProxyInput,
 } from "@/api/types"
 
 export class ApiError extends Error {
@@ -69,6 +71,19 @@ export const api = {
   logout: () => request<void>("/api/auth/logout", { method: "POST" }),
   dashboard: () => request<DashboardSummary>("/api/dashboard"),
   subscriptions: () => request<Subscription[]>("/api/subscriptions"),
+  proxies: () => request<UpstreamProxy[]>("/api/proxies"),
+  createProxy: (input: UpstreamProxyInput) =>
+    request<UpstreamProxy>("/api/proxies", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  updateProxy: (id: string, input: Partial<UpstreamProxyInput>) =>
+    request<UpstreamProxy>(`/api/proxies/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  deleteProxy: (id: string) =>
+    request<void>(`/api/proxies/${id}`, { method: "DELETE" }),
   createSubscription: (input: SubscriptionInput) =>
     request<Subscription>("/api/subscriptions", {
       method: "POST",

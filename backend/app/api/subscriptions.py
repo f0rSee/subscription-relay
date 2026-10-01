@@ -7,7 +7,14 @@ from fastapi import APIRouter, HTTPException, Response, status
 from sqlalchemy import func, select
 
 from ..dependencies import SecretBoxDep, SessionDep, SettingsDep
-from ..models import Profile, ProfileSubscription, Subscription, SubscriptionUsage
+from ..models import (
+    Profile,
+    ProfileSubscription,
+    Subscription,
+    SubscriptionProxy,
+    SubscriptionUsage,
+    UpstreamProxy,
+)
 from ..schemas import (
     SubscriptionCreate,
     SubscriptionResponse,
@@ -15,7 +22,7 @@ from ..schemas import (
     SyncResponse,
 )
 from ..services.presenters import subscription_response
-from ..services.subscriptions import sync_subscription
+from ..services.subscriptions import proxy_urls_for_subscriptions, sync_subscription
 
 router = APIRouter(prefix="/subscriptions", tags=["subscriptions"])
 
@@ -35,10 +42,14 @@ async def list_subscriptions(
 ) -> list[SubscriptionResponse]:
     rows = (
         await session.execute(
-            select(Subscription, SubscriptionUsage)
+            select(Subscription, SubscriptionUsage, SubscriptionProxy.proxy_id)
             .outerjoin(
                 SubscriptionUsage,
                 SubscriptionUsage.subscription_id == Subscription.id,
+            )
+            .outerjoin(
+                SubscriptionProxy,
+                SubscriptionProxy.subscription_id == Subscription.id,
             )
             .order_by(
                 Subscription.priority,
@@ -47,8 +58,8 @@ async def list_subscriptions(
         )
     ).all()
     return [
-        subscription_response(subscription, usage, secret_box)
-        for subscription, usage in rows
+        subscription_response(subscription, usage, secret_box, proxy_id)
+        for subscription, usage, proxy_id in rows
     ]
 
 
@@ -63,6 +74,11 @@ async def create_subscription(
         payload.url,
         allow_insecure_http=settings.allow_insecure_http,
     )
+    if (
+        payload.proxy_id is not None
+        and await session.get(UpstreamProxy, payload.proxy_id) is None
+    ):
+        raise HTTPException(status_code=422, detail="Unknown proxy")
     subscription = Subscription(
         name=payload.name,
         url_ciphertext=secret_box.encrypt(payload.url),
@@ -71,6 +87,12 @@ async def create_subscription(
     )
     session.add(subscription)
     await session.flush()
+    if payload.proxy_id is not None:
+        session.add(
+            SubscriptionProxy(
+                subscription_id=subscription.id, proxy_id=payload.proxy_id
+            )
+        )
 
     default_profile = await session.scalar(
         select(Profile).where(Profile.token == settings.relay_token)
@@ -89,7 +111,7 @@ async def create_subscription(
             )
         )
     await session.commit()
-    return subscription_response(subscription, None, secret_box)
+    return subscription_response(subscription, None, secret_box, payload.proxy_id)
 
 
 @router.patch("/{subscription_id}")
@@ -106,6 +128,26 @@ async def update_subscription(
 
     usage = await session.get(SubscriptionUsage, subscription_id)
     updates = payload.model_dump(exclude_unset=True, exclude_none=True)
+    updates.pop("proxy_id", None)
+    proxy_link = await session.get(SubscriptionProxy, subscription_id)
+    if "proxy_id" in payload.model_fields_set:
+        if (
+            payload.proxy_id is not None
+            and await session.get(UpstreamProxy, payload.proxy_id) is None
+        ):
+            raise HTTPException(status_code=422, detail="Unknown proxy")
+        if proxy_link is not None and payload.proxy_id is None:
+            await session.delete(proxy_link)
+            proxy_link = None
+        elif proxy_link is None and payload.proxy_id is not None:
+            proxy_link = SubscriptionProxy(
+                subscription_id=subscription_id, proxy_id=payload.proxy_id
+            )
+            session.add(proxy_link)
+        elif proxy_link is not None and payload.proxy_id is not None:
+            proxy_link.proxy_id = payload.proxy_id
+        subscription.status = "never"
+        subscription.last_error = None
     if "url" in updates:
         url = updates.pop("url")
         if url is None:
@@ -122,7 +164,9 @@ async def update_subscription(
     for key, value in updates.items():
         setattr(subscription, key, value)
     await session.commit()
-    return subscription_response(subscription, usage, secret_box)
+    return subscription_response(
+        subscription, usage, secret_box, proxy_link.proxy_id if proxy_link else None
+    )
 
 
 @router.delete("/{subscription_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -149,11 +193,15 @@ async def sync_source(
     if subscription is None:
         raise HTTPException(status_code=404, detail="Subscription not found")
     try:
+        proxy_urls = await proxy_urls_for_subscriptions(
+            session, [subscription_id], secret_box
+        )
         count = await sync_subscription(
             session,
             subscription,
             settings,
             secret_box,
+            proxy_urls.get(subscription_id),
         )
     except httpx.HTTPStatusError as exc:
         raise HTTPException(

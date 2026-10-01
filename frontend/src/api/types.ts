@@ -40,6 +40,7 @@ export interface Subscription {
   id: string
   name: string
   url_hint: string
+  proxy_id: string | null
   enabled: boolean
   priority: number
   status: "never" | "healthy" | "error" | string
@@ -49,6 +50,19 @@ export interface Subscription {
   traffic: TrafficUsage | null
   created_at: string
   updated_at: string
+}
+
+export interface UpstreamProxy {
+  id: string
+  name: string
+  url_hint: string
+  created_at: string
+  updated_at: string
+}
+
+export interface UpstreamProxyInput {
+  name: string
+  url: string
 }
 
 export interface Profile {
@@ -113,6 +127,7 @@ export interface SubscriptionInput {
   url: string
   enabled?: boolean
   priority?: number
+  proxy_id?: string | null
 }
 
 export interface ProfileInput {

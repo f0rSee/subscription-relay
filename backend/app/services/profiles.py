@@ -24,6 +24,7 @@ from .subscriptions import (
     encode_subscription,
     persist_subscription_syncs,
     prepare_subscription_sync,
+    proxy_urls_for_subscriptions,
 )
 from .traffic import profile_traffic_summary, subscription_userinfo_header
 
@@ -126,6 +127,13 @@ async def refresh_profile_sources(
         if not subscriptions_to_refresh:
             return
 
+        async with runtime.database.sessions() as session:
+            proxy_urls = await proxy_urls_for_subscriptions(
+                session,
+                [subscription.id for subscription in subscriptions_to_refresh],
+                runtime.secret_box,
+            )
+
         # Network waits dominate synchronization, so fetch independent sources
         # concurrently. The database update remains one atomic transaction.
         semaphore = asyncio.Semaphore(8)
@@ -138,6 +146,7 @@ async def refresh_profile_sources(
                     subscription,
                     runtime.settings,
                     runtime.secret_box,
+                    proxy_urls.get(subscription.id),
                 )
 
         results = await asyncio.gather(

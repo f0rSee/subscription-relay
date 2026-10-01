@@ -22,6 +22,7 @@ import {
   MonitorIcon,
   MoonIcon,
   RadioTowerIcon,
+  RouteIcon,
   ScrollTextIcon,
   SettingsIcon,
   SmartphoneIcon,
@@ -31,6 +32,7 @@ import {
 
 export type DashboardView =
   | "subscriptions"
+  | "proxies"
   | "profiles"
   | "order"
   | "logs"
@@ -58,6 +60,11 @@ const navigationGroups = [
         label: "Источники",
         icon: Layers3Icon,
         countKey: "subscriptionsCount",
+      },
+      {
+        id: "proxies",
+        label: "Прокси",
+        icon: RouteIcon,
       },
       {
         id: "profiles",

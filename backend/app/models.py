@@ -51,6 +51,41 @@ class Subscription(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    proxy_link: Mapped[SubscriptionProxy | None] = relationship(
+        back_populates="subscription", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class UpstreamProxy(Base):
+    __tablename__ = "upstream_proxies"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(160))
+    url_ciphertext: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    subscription_links: Mapped[list[SubscriptionProxy]] = relationship(
+        back_populates="proxy", cascade="all, delete-orphan"
+    )
+
+
+class SubscriptionProxy(Base):
+    __tablename__ = "subscription_proxies"
+
+    subscription_id: Mapped[str] = mapped_column(
+        ForeignKey("subscriptions.id", ondelete="CASCADE"), primary_key=True
+    )
+    proxy_id: Mapped[str] = mapped_column(
+        ForeignKey("upstream_proxies.id", ondelete="CASCADE"), index=True
+    )
+
+    subscription: Mapped[Subscription] = relationship(back_populates="proxy_link")
+    proxy: Mapped[UpstreamProxy] = relationship(back_populates="subscription_links")
 
 
 class SubscriptionUsage(Base):

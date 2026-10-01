@@ -15,6 +15,7 @@ class SubscriptionCreate(BaseModel):
     url: str = Field(min_length=8, max_length=4096)
     enabled: bool = True
     priority: int = Field(default=100, ge=0, le=10000)
+    proxy_id: str | None = None
 
 
 class SubscriptionUpdate(BaseModel):
@@ -22,6 +23,25 @@ class SubscriptionUpdate(BaseModel):
     url: str | None = Field(default=None, min_length=8, max_length=4096)
     enabled: bool | None = None
     priority: int | None = Field(default=None, ge=0, le=10000)
+    proxy_id: str | None = None
+
+
+class ProxyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    url: str = Field(min_length=8, max_length=4096)
+
+
+class ProxyUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    url: str | None = Field(default=None, min_length=8, max_length=4096)
+
+
+class ProxyResponse(BaseModel):
+    id: str
+    name: str
+    url_hint: str
+    created_at: datetime
+    updated_at: datetime
 
 
 class ProfileCreate(BaseModel):
@@ -84,6 +104,7 @@ class SubscriptionResponse(BaseModel):
     id: str
     name: str
     url_hint: str
+    proxy_id: str | None
     enabled: bool
     priority: int
     status: str

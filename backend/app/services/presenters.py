@@ -26,6 +26,7 @@ def subscription_response(
     subscription: Subscription,
     usage: SubscriptionUsage | None,
     secret_box: SecretBox,
+    proxy_id: str | None = None,
 ) -> SubscriptionResponse:
     try:
         url_hint = _masked_url(secret_box.decrypt(subscription.url_ciphertext))
@@ -36,6 +37,7 @@ def subscription_response(
         id=subscription.id,
         name=subscription.name,
         url_hint=url_hint,
+        proxy_id=proxy_id,
         enabled=subscription.enabled,
         priority=subscription.priority,
         status=subscription.status,

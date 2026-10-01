@@ -1,5 +1,5 @@
 import { useMemo, useState, type FormEvent } from "react"
-import type { Subscription, SubscriptionInput } from "@/api/types"
+import type { Subscription, SubscriptionInput, UpstreamProxy } from "@/api/types"
 import { Alert, AlertDescription, AlertTitle } from "@/components/reui/alert"
 import { Badge, type BadgeProps } from "@/components/reui/badge"
 import {
@@ -30,6 +30,12 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+} from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { TrafficUsageView } from "@/components/traffic-usage"
 import { useTable } from "@tanstack/react-table"
@@ -43,11 +49,13 @@ import {
 
 interface SubscriptionsViewProps {
   subscriptions: Subscription[]
+  proxies: UpstreamProxy[]
   loading: boolean
   error: string
   onRetry: () => void
   onCreate: (input: SubscriptionInput) => Promise<void>
   onToggle: (subscription: Subscription, enabled: boolean) => Promise<void>
+  onAssignProxy: (subscription: Subscription, proxyId: string | null) => Promise<void>
   onSync: (subscription: Subscription) => Promise<void>
   onDelete: (subscription: Subscription) => Promise<void>
 }
@@ -69,12 +77,20 @@ function formatSyncDate(value: string | null) {
   }).format(new Date(value))
 }
 
+function proxyLabel(proxies: UpstreamProxy[], proxyId: string) {
+  return proxyId === "direct"
+    ? "Напрямую"
+    : (proxies.find((proxy) => proxy.id === proxyId)?.name ?? "Прокси удалён")
+}
+
 function AddSubscriptionDialog({
   onCreate,
-}: Pick<SubscriptionsViewProps, "onCreate">) {
+  proxies,
+}: Pick<SubscriptionsViewProps, "onCreate" | "proxies">) {
   const [open, setOpen] = useState(false)
   const [name, setName] = useState("")
   const [url, setUrl] = useState("")
+  const [proxyId, setProxyId] = useState("direct")
   const [error, setError] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
@@ -83,9 +99,10 @@ function AddSubscriptionDialog({
     setSubmitting(true)
     setError("")
     try {
-      await onCreate({ name, url })
+      await onCreate({ name, url, proxy_id: proxyId === "direct" ? null : proxyId })
       setName("")
       setUrl("")
+      setProxyId("direct")
       setOpen(false)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось добавить источник")
@@ -130,6 +147,20 @@ function AddSubscriptionDialog({
                 required
               />
             </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="subscription-proxy">Прокси для обновления</Label>
+              <Select value={proxyId} onValueChange={(value) => setProxyId(value ?? "direct")}>
+                <SelectTrigger id="subscription-proxy" className="w-full">
+                  {proxyLabel(proxies, proxyId)}
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="direct">Напрямую</SelectItem>
+                  {proxies.map((proxy) => (
+                    <SelectItem key={proxy.id} value={proxy.id}>{proxy.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             {error && <p className="text-sm text-destructive">{error}</p>}
           </div>
           <DialogFooter>
@@ -144,18 +175,22 @@ function AddSubscriptionDialog({
 }
 
 export function SubscriptionsView(props: SubscriptionsViewProps) {
-  const { subscriptions, loading, error, onRetry, onCreate, onToggle, onSync, onDelete } = props
+  const { subscriptions, proxies, loading, error, onRetry, onCreate, onToggle, onAssignProxy, onSync, onDelete } = props
   const [pagination, setPagination] = useState<PaginationState>({
     pageIndex: 0,
     pageSize: 10,
   })
   const [sorting, setSorting] = useState<SortingState>([])
   const [pendingId, setPendingId] = useState("")
+  const [actionError, setActionError] = useState("")
 
   async function run(id: string, action: () => Promise<void>) {
     setPendingId(id)
+    setActionError("")
     try {
       await action()
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : "Не удалось обновить источник")
     } finally {
       setPendingId("")
     }
@@ -176,6 +211,30 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
         ),
         size: 300,
         enableSorting: true,
+      },
+      {
+        id: "proxy",
+        header: "Прокси",
+        cell: ({ row }) => (
+          <Select
+            value={row.original.proxy_id ?? "direct"}
+            onValueChange={(value) => {
+              if (value) void run(row.original.id, () => onAssignProxy(row.original, value === "direct" ? null : value))
+            }}
+            disabled={pendingId === row.original.id}
+          >
+            <SelectTrigger size="sm" className="w-40" aria-label={`Прокси для ${row.original.name}`}>
+              {proxyLabel(proxies, row.original.proxy_id ?? "direct")}
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="direct">Напрямую</SelectItem>
+              {proxies.map((proxy) => (
+                <SelectItem key={proxy.id} value={proxy.id}>{proxy.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ),
+        size: 180,
       },
       {
         accessorKey: "status",
@@ -283,7 +342,7 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
         size: 100,
       },
     ],
-    [onDelete, onSync, onToggle, pendingId],
+    [onAssignProxy, onDelete, onSync, onToggle, pendingId, proxies],
   )
 
   const table = useTable({
@@ -306,17 +365,15 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
             Сервис забирает данные по URL и обновляет список серверов для профилей.
           </FrameDescription>
         </div>
-        <AddSubscriptionDialog onCreate={onCreate} />
+        <AddSubscriptionDialog onCreate={onCreate} proxies={proxies} />
       </FrameHeader>
       <FramePanel className="p-2!">
-        {error && (
+        {(error || actionError) && (
           <Alert variant="destructive" className="mb-2">
             <TriangleAlertIcon aria-hidden="true" />
-            <AlertTitle>Не удалось загрузить источники</AlertTitle>
-            <AlertDescription>{error}</AlertDescription>
-            <Button type="button" size="sm" variant="outline" onClick={onRetry}>
-              Повторить
-            </Button>
+            <AlertTitle>Ошибка источника</AlertTitle>
+            <AlertDescription>{actionError || error}</AlertDescription>
+            {error && <Button type="button" size="sm" variant="outline" onClick={onRetry}>Повторить</Button>}
           </Alert>
         )}
         <DataGrid
