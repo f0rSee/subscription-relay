@@ -6,6 +6,7 @@ import {
   DataGrid,
   DataGridContainer,
   dataGridFeatures,
+  getColumnHeaderLabel,
   type DataGridFeatures,
 } from "@/components/reui/data-grid/data-grid"
 import { DataGridPagination } from "@/components/reui/data-grid/data-grid-pagination"
@@ -30,6 +31,7 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Skeleton } from "@/components/ui/skeleton"
 import {
   Select,
   SelectContent,
@@ -38,7 +40,8 @@ import {
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { TrafficUsageView } from "@/components/traffic-usage"
-import { useTable } from "@tanstack/react-table"
+import { cn } from "@/lib/utils"
+import { flexRender, useTable } from "@tanstack/react-table"
 import type { ColumnDef, PaginationState, SortingState } from "@tanstack/react-table"
 import {
   PlusIcon,
@@ -69,6 +72,16 @@ const statusPresentation: Record<
   error: { label: "Ошибка", variant: "destructive-outline" },
   never: { label: "Не проверена", variant: "warning-outline" },
 }
+
+const sortingOptions: { value: string; label: string; sorting: SortingState }[] = [
+  { value: "default", label: "По умолчанию", sorting: [] },
+  { value: "name:asc", label: "Название: А → Я", sorting: [{ id: "name", desc: false }] },
+  { value: "name:desc", label: "Название: Я → А", sorting: [{ id: "name", desc: true }] },
+  { value: "node_count:asc", label: "Серверы: по возрастанию", sorting: [{ id: "node_count", desc: false }] },
+  { value: "node_count:desc", label: "Серверы: по убыванию", sorting: [{ id: "node_count", desc: true }] },
+  { value: "traffic:asc", label: "Трафик: по возрастанию", sorting: [{ id: "traffic", desc: false }] },
+  { value: "traffic:desc", label: "Трафик: по убыванию", sorting: [{ id: "traffic", desc: true }] },
+]
 
 function formatSyncDate(value: string | null) {
   if (!value) return "Ещё не запускалась"
@@ -204,14 +217,14 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
         accessorKey: "name",
         header: "Источник",
         cell: ({ row }) => (
-          <div className="min-w-52 space-y-0.5">
-            <p className="font-medium text-foreground">{row.original.name}</p>
-            <p className="max-w-80 truncate text-xs text-muted-foreground">
+          <div className="min-w-0 space-y-0.5">
+            <p className="font-medium wrap-anywhere text-foreground">{row.original.name}</p>
+            <p className="truncate text-xs text-muted-foreground" title={row.original.url_hint}>
               {row.original.url_hint}
             </p>
           </div>
         ),
-        size: 300,
+        meta: { headerClassName: "w-[16%]" },
         enableSorting: true,
       },
       {
@@ -225,8 +238,10 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
             }}
             disabled={Boolean(proxiesError) || pendingId === row.original.id}
           >
-            <SelectTrigger size="sm" className="w-40" aria-label={`Прокси для ${row.original.name}`}>
-              {proxyLabel(proxies, row.original.proxy_id ?? "direct")}
+            <SelectTrigger size="sm" className="w-full min-w-0" aria-label={`Прокси для ${row.original.name}`}>
+              <span className="truncate" title={proxyLabel(proxies, row.original.proxy_id ?? "direct")}>
+                {proxyLabel(proxies, row.original.proxy_id ?? "direct")}
+              </span>
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="direct">Напрямую</SelectItem>
@@ -236,7 +251,7 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
             </SelectContent>
           </Select>
         ),
-        size: 180,
+        meta: { headerClassName: "w-[13%]" },
       },
       {
         accessorKey: "status",
@@ -248,16 +263,18 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
           }
           return (
             <div className="space-y-1">
-              <Badge variant={presentation.variant}>{presentation.label}</Badge>
+              <Badge variant={presentation.variant} className="max-w-full whitespace-normal wrap-anywhere">
+                {presentation.label}
+              </Badge>
               {row.original.last_error && (
-                <p className="max-w-52 truncate text-xs text-destructive" title={row.original.last_error}>
+                <p className="truncate text-xs text-destructive" title={row.original.last_error}>
                   {row.original.last_error}
                 </p>
               )}
             </div>
           )
         },
-        size: 150,
+        meta: { headerClassName: "w-[11%]" },
       },
       {
         accessorKey: "node_count",
@@ -265,7 +282,7 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
         cell: ({ row }) => (
           <span className="font-medium tabular-nums">{row.original.node_count}</span>
         ),
-        size: 90,
+        meta: { headerClassName: "w-[8%]" },
         enableSorting: true,
       },
       {
@@ -273,23 +290,20 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
         accessorFn: (subscription) => subscription.traffic?.used ?? -1,
         header: "Трафик",
         cell: ({ row }) => (
-          <TrafficUsageView
-            traffic={row.original.traffic}
-            className="min-w-64"
-          />
+          <TrafficUsageView traffic={row.original.traffic} />
         ),
-        size: 280,
+        meta: { headerClassName: "w-[21%]" },
         enableSorting: true,
       },
       {
         accessorKey: "last_sync_at",
         header: "Последняя синхронизация",
         cell: ({ row }) => (
-          <span className="whitespace-nowrap text-muted-foreground">
+          <span className="text-muted-foreground">
             {formatSyncDate(row.original.last_sync_at)}
           </span>
         ),
-        size: 180,
+        meta: { headerClassName: "w-[13%]" },
       },
       {
         id: "enabled",
@@ -305,7 +319,7 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
             }
           />
         ),
-        size: 90,
+        meta: { headerClassName: "w-[9%]" },
       },
       {
         id: "actions",
@@ -341,7 +355,7 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
             </Button>
           </div>
         ),
-        size: 100,
+        meta: { headerClassName: "w-[9%]" },
       },
     ],
     [onAssignProxy, onDelete, onSync, onToggle, pendingId, proxies, proxiesError],
@@ -357,11 +371,14 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
     onPaginationChange: setPagination,
     onSortingChange: setSorting,
   })
+  const sortValue = sorting[0]
+    ? `${sorting[0].id}:${sorting[0].desc ? "desc" : "asc"}`
+    : "default"
 
   return (
     <Frame spacing="sm">
-      <FrameHeader className="flex-row items-center justify-between gap-4">
-        <div>
+      <FrameHeader className="flex-row flex-wrap items-center justify-between gap-4">
+        <div className="min-w-0">
           <FrameTitle>Источники подписок</FrameTitle>
           <FrameDescription>
             Сервис забирает данные по URL и обновляет список серверов для профилей.
@@ -394,15 +411,78 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
           tableLayout={{
             headerBackground: true,
             rowBorder: true,
-            columnsResizable: true,
+            width: "auto",
+          }}
+          tableClassNames={{
+            base: "table-fixed",
+            headerRow: "[&>th]:px-2 [&>th]:py-2 [&>th]:wrap-anywhere",
+            bodyRow: "[&>td]:px-2",
           }}
         >
-          <div className="w-full space-y-2.5">
-            <DataGridContainer>
+          <div className="@container w-full min-w-0 space-y-2.5">
+            <div className="flex flex-wrap items-center gap-2 px-1 py-2">
+              <Label htmlFor="subscription-sort">Сортировка</Label>
+              <Select
+                value={sortValue}
+                onValueChange={(value) => {
+                  const option = sortingOptions.find((item) => item.value === value)
+                  if (!option) return
+                  setSorting(option.sorting)
+                  table.setPageIndex(0)
+                }}
+                disabled={loading || subscriptions.length === 0}
+              >
+                <SelectTrigger id="subscription-sort" size="sm" className="w-full min-w-0 @sm:w-64">
+                  <span className="truncate">
+                    {sortingOptions.find((option) => option.value === sortValue)?.label}
+                  </span>
+                </SelectTrigger>
+                <SelectContent>
+                  {sortingOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <DataGridContainer className="hidden @5xl:block">
               <DataGridScrollArea>
                 <DataGridTable />
               </DataGridScrollArea>
             </DataGridContainer>
+            <div className="grid gap-3 @5xl:hidden">
+              {loading ? (
+                Array.from({ length: 3 }, (_, index) => (
+                  <Skeleton key={index} className="h-72 w-full rounded-lg" />
+                ))
+              ) : subscriptions.length === 0 ? (
+                <p className="py-8 text-center text-sm text-muted-foreground">
+                  Источников пока нет. Добавьте первую подписку.
+                </p>
+              ) : (
+                table.getRowModel().rows.map((row) => (
+                  <article key={row.id} aria-label={row.original.name} className="min-w-0 rounded-lg border p-4">
+                    <dl className="grid grid-cols-2 gap-4 @xl:grid-cols-3">
+                      {row.getVisibleCells().map((cell) => (
+                        <div
+                          key={cell.id}
+                          className={cn("min-w-0", {
+                            "col-span-2": ["name", "traffic", "last_sync_at"].includes(cell.column.id),
+                            "@xl:col-span-1": cell.column.id !== "traffic",
+                          })}
+                        >
+                          <dt className="mb-1.5 text-xs text-muted-foreground">
+                            {getColumnHeaderLabel(cell.column)}
+                          </dt>
+                          <dd className="text-sm">
+                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+                  </article>
+                ))
+              )}
+            </div>
             {subscriptions.length > pagination.pageSize && <DataGridPagination />}
           </div>
         </DataGrid>
