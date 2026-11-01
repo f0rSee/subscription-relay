@@ -214,7 +214,7 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
             </p>
           </div>
         ),
-        meta: { headerClassName: "w-[18%]" },
+        meta: { headerClassName: "w-[16%]" },
         enableSorting: true,
       },
       {
@@ -309,7 +309,7 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
             }
           />
         ),
-        meta: { headerClassName: "w-[7%]" },
+        meta: { headerClassName: "w-[9%]" },
       },
       {
         id: "actions",
