@@ -73,6 +73,16 @@ const statusPresentation: Record<
   never: { label: "Не проверена", variant: "warning-outline" },
 }
 
+const sortingOptions: { value: string; label: string; sorting: SortingState }[] = [
+  { value: "default", label: "По умолчанию", sorting: [] },
+  { value: "name:asc", label: "Название: А → Я", sorting: [{ id: "name", desc: false }] },
+  { value: "name:desc", label: "Название: Я → А", sorting: [{ id: "name", desc: true }] },
+  { value: "node_count:asc", label: "Серверы: по возрастанию", sorting: [{ id: "node_count", desc: false }] },
+  { value: "node_count:desc", label: "Серверы: по убыванию", sorting: [{ id: "node_count", desc: true }] },
+  { value: "traffic:asc", label: "Трафик: по возрастанию", sorting: [{ id: "traffic", desc: false }] },
+  { value: "traffic:desc", label: "Трафик: по убыванию", sorting: [{ id: "traffic", desc: true }] },
+]
+
 function formatSyncDate(value: string | null) {
   if (!value) return "Ещё не запускалась"
   return new Intl.DateTimeFormat("ru", {
@@ -361,6 +371,9 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
     onPaginationChange: setPagination,
     onSortingChange: setSorting,
   })
+  const sortValue = sorting[0]
+    ? `${sorting[0].id}:${sorting[0].desc ? "desc" : "asc"}`
+    : "default"
 
   return (
     <Frame spacing="sm">
@@ -407,6 +420,30 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
           }}
         >
           <div className="@container w-full min-w-0 space-y-2.5">
+            <div className="flex flex-wrap items-center gap-2 px-1 py-2">
+              <Label htmlFor="subscription-sort">Сортировка</Label>
+              <Select
+                value={sortValue}
+                onValueChange={(value) => {
+                  const option = sortingOptions.find((item) => item.value === value)
+                  if (!option) return
+                  setSorting(option.sorting)
+                  table.setPageIndex(0)
+                }}
+                disabled={loading || subscriptions.length === 0}
+              >
+                <SelectTrigger id="subscription-sort" size="sm" className="w-full min-w-0 @sm:w-64">
+                  <span className="truncate">
+                    {sortingOptions.find((option) => option.value === sortValue)?.label}
+                  </span>
+                </SelectTrigger>
+                <SelectContent>
+                  {sortingOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             <DataGridContainer className="hidden @5xl:block">
               <DataGridScrollArea>
                 <DataGridTable />
