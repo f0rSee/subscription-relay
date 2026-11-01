@@ -4,6 +4,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from .device_settings import DeviceSettings
+
 
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=160)
@@ -16,6 +18,7 @@ class SubscriptionCreate(BaseModel):
     enabled: bool = True
     priority: int = Field(default=100, ge=0, le=10000)
     proxy_id: str | None = None
+    device_settings: DeviceSettings | None = None
 
 
 class SubscriptionUpdate(BaseModel):
@@ -24,6 +27,7 @@ class SubscriptionUpdate(BaseModel):
     enabled: bool | None = None
     priority: int | None = Field(default=None, ge=0, le=10000)
     proxy_id: str | None = None
+    device_settings: DeviceSettings | None = None
 
 
 class ProxyCreate(BaseModel):
@@ -61,6 +65,7 @@ class NodeOrderUpdate(BaseModel):
 
 
 class RelaySettingsUpdate(BaseModel):
+    default_device_settings: DeviceSettings | None = None
     deduplicate_servers: bool | None = None
     request_logging_enabled: bool | None = None
     device_tracking_enabled: bool | None = None
@@ -105,6 +110,7 @@ class SubscriptionResponse(BaseModel):
     name: str
     url_hint: str
     proxy_id: str | None
+    device_settings: DeviceSettings | None
     enabled: bool
     priority: int
     status: str
@@ -175,6 +181,7 @@ class ClientDeviceResponse(BaseModel):
 
 
 class RelaySettingsResponse(BaseModel):
+    default_device_settings: DeviceSettings
     deduplicate_servers: bool
     request_logging_enabled: bool
     device_tracking_enabled: bool

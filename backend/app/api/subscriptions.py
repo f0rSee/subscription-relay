@@ -12,6 +12,7 @@ from ..models import (
     Profile,
     ProfileSubscription,
     Subscription,
+    SubscriptionDeviceSettings,
     SubscriptionProxy,
     SubscriptionUsage,
     UpstreamProxy,
@@ -23,6 +24,7 @@ from ..schemas import (
     SyncResponse,
 )
 from ..services.presenters import subscription_response
+from ..services.settings import get_default_device_settings
 from ..services.subscriptions import (
     StaleSubscriptionSync,
     proxy_urls_for_subscriptions,
@@ -90,6 +92,11 @@ async def create_subscription(
         enabled=payload.enabled,
         priority=payload.priority,
     )
+    subscription.device_settings = (
+        SubscriptionDeviceSettings(**payload.device_settings.model_dump())
+        if payload.device_settings
+        else None
+    )
     session.add(subscription)
     await session.flush()
     if payload.proxy_id is not None:
@@ -134,6 +141,21 @@ async def update_subscription(
     usage = await session.get(SubscriptionUsage, subscription_id)
     updates = payload.model_dump(exclude_unset=True, exclude_none=True)
     updates.pop("proxy_id", None)
+    updates.pop("device_settings", None)
+    if "device_settings" in payload.model_fields_set:
+        subscription.updated_at = datetime.now(UTC)
+        await session.flush()
+        if payload.device_settings is None:
+            subscription.device_settings = None
+        elif subscription.device_settings is None:
+            subscription.device_settings = SubscriptionDeviceSettings(
+                **payload.device_settings.model_dump()
+            )
+        else:
+            for key, value in payload.device_settings.model_dump().items():
+                setattr(subscription.device_settings, key, value)
+        subscription.status = "never"
+        subscription.last_error = None
     proxy_link = await session.get(SubscriptionProxy, subscription_id)
     if "proxy_id" in payload.model_fields_set:
         if (
@@ -209,6 +231,7 @@ async def sync_source(
             settings,
             secret_box,
             proxy_urls.get(subscription_id),
+            await get_default_device_settings(session),
         )
     except StaleSubscriptionSync as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

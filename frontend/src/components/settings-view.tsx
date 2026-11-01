@@ -8,6 +8,7 @@ import {
   FramePanel,
   FrameTitle,
 } from "@/components/reui/frame"
+import { DefaultDeviceSettingsForm } from "@/components/device-settings"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import {
@@ -123,6 +124,23 @@ export function SettingsView({ settings, loading, error, onUpdate }: SettingsVie
               </FramePanel>
             )
           })}
+        </Frame>
+      )}
+      {settings && !loading && (
+        <Frame>
+          <FrameHeader>
+            <FrameTitle>Устройство по умолчанию</FrameTitle>
+            <FrameDescription>
+              Параметры устройства для запросов к провайдерам подписок. Для каждого источника можно задать свои значения в разделе «Источники».
+            </FrameDescription>
+          </FrameHeader>
+          <FramePanel>
+            <DefaultDeviceSettingsForm
+              key={JSON.stringify(settings.default_device_settings)}
+              initial={settings.default_device_settings}
+              onSave={(value) => onUpdate({ default_device_settings: value })}
+            />
+          </FramePanel>
         </Frame>
       )}
       {pendingKey && (

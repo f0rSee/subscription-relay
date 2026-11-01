@@ -1,5 +1,5 @@
 import { useMemo, useState, type FormEvent } from "react"
-import type { Subscription, SubscriptionInput, UpstreamProxy } from "@/api/types"
+import type { DeviceSettings, Subscription, SubscriptionInput, UpstreamProxy } from "@/api/types"
 import { Alert, AlertDescription, AlertTitle } from "@/components/reui/alert"
 import { Badge, type BadgeProps } from "@/components/reui/badge"
 import {
@@ -39,6 +39,7 @@ import {
   SelectTrigger,
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
+import { SubscriptionDeviceDialog } from "@/components/device-settings"
 import { TrafficUsageView } from "@/components/traffic-usage"
 import { cn } from "@/lib/utils"
 import { flexRender, useTable } from "@tanstack/react-table"
@@ -52,6 +53,9 @@ import {
 
 interface SubscriptionsViewProps {
   subscriptions: Subscription[]
+  defaultDeviceSettings: DeviceSettings | null
+  settingsError: string
+  onSaveDevice: (subscription: Subscription, value: DeviceSettings | null) => Promise<void>
   proxies: UpstreamProxy[]
   proxiesError: string
   loading: boolean
@@ -190,7 +194,7 @@ function AddSubscriptionDialog({
 }
 
 export function SubscriptionsView(props: SubscriptionsViewProps) {
-  const { subscriptions, proxies, proxiesError, loading, error, onRetry, onCreate, onToggle, onAssignProxy, onSync, onDelete } = props
+  const { subscriptions, proxies, proxiesError, loading, error, onRetry, onCreate, onToggle, onAssignProxy, onSync, onDelete, defaultDeviceSettings, settingsError, onSaveDevice } = props
   const [pagination, setPagination] = useState<PaginationState>({
     pageIndex: 0,
     pageSize: 10,
@@ -222,6 +226,12 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
             <p className="truncate text-xs text-muted-foreground" title={row.original.url_hint}>
               {row.original.url_hint}
             </p>
+            <SubscriptionDeviceDialog
+              subscription={row.original}
+              defaults={defaultDeviceSettings}
+              disabled={pendingId === row.original.id}
+              onSave={(value) => onSaveDevice(row.original, value)}
+            />
           </div>
         ),
         meta: { headerClassName: "w-[16%]" },
@@ -358,7 +368,7 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
         meta: { headerClassName: "w-[9%]" },
       },
     ],
-    [onAssignProxy, onDelete, onSync, onToggle, pendingId, proxies, proxiesError],
+    [onAssignProxy, onDelete, onSync, onToggle, pendingId, proxies, proxiesError, defaultDeviceSettings, onSaveDevice],
   )
 
   const table = useTable({
@@ -393,6 +403,14 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
             <AlertTitle>Ошибка источника</AlertTitle>
             <AlertDescription>{actionError || error}</AlertDescription>
             {error && <Button type="button" size="sm" variant="outline" onClick={onRetry}>Повторить</Button>}
+          </Alert>
+        )}
+        {settingsError && (
+          <Alert variant="destructive" className="mb-2">
+            <TriangleAlertIcon aria-hidden="true" />
+            <AlertTitle>Параметры устройства недоступны</AlertTitle>
+            <AlertDescription>{settingsError}</AlertDescription>
+            <Button type="button" size="sm" variant="outline" onClick={onRetry}>Повторить</Button>
           </Alert>
         )}
         {proxiesError && (

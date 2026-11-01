@@ -36,11 +36,20 @@ export interface ProfileTraffic extends TrafficUsage {
   sources_total: number
 }
 
+export interface DeviceSettings {
+  user_agent: string
+  hwid: string
+  os: string
+  os_version: string
+  model: string
+}
+
 export interface Subscription {
   id: string
   name: string
   url_hint: string
   proxy_id: string | null
+  device_settings: DeviceSettings | null
   enabled: boolean
   priority: number
   status: "never" | "healthy" | "error" | string
@@ -115,6 +124,7 @@ export interface ClientDevice {
 }
 
 export interface RelaySettings {
+  default_device_settings: DeviceSettings
   deduplicate_servers: boolean
   request_logging_enabled: boolean
   device_tracking_enabled: boolean
@@ -128,6 +138,7 @@ export interface SubscriptionInput {
   enabled?: boolean
   priority?: number
   proxy_id?: string | null
+  device_settings?: DeviceSettings | null
 }
 
 export interface ProfileInput {
@@ -149,5 +160,6 @@ export type RelaySettingsInput = Partial<
     | "request_logging_enabled"
     | "device_tracking_enabled"
     | "auto_refresh_enabled"
+    | "default_device_settings"
   >
 >

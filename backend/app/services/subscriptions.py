@@ -13,6 +13,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import Settings
+from ..device_settings import DeviceSettings
 from ..models import (
     Node,
     Subscription,
@@ -33,15 +34,8 @@ SUPPORTED_PROTOCOLS = (
     "tuic",
     "wireguard",
 )
-UPSTREAM_USER_AGENT = "VPNClient/2.0/ios/2731171157721"
-UPSTREAM_HEADERS = {
-    "User-Agent": UPSTREAM_USER_AGENT,
-    "Accept": "text/plain, */*",
-    "X-HWID": "4139def9-6877-4771-b313-49e3119ba158",
-    "X-Device-OS": "iOS",
-    "X-Ver-OS": "27.0",
-    "X-Device-Model": "iPhone 17 Pro Max",
-}
+UPSTREAM_USER_AGENT = DeviceSettings().user_agent
+UPSTREAM_HEADERS = DeviceSettings().headers()
 MAX_TRAFFIC_VALUE = 2**63 - 1
 
 
@@ -196,6 +190,7 @@ async def fetch_subscription(
     url: str,
     settings: Settings,
     proxy_url: str | None = None,
+    device_settings: DeviceSettings | None = None,
 ) -> tuple[bytes, httpx.Headers]:
     timeout = httpx.Timeout(settings.timeout_seconds)
     async with httpx.AsyncClient(
@@ -205,7 +200,9 @@ async def fetch_subscription(
         # Direct sources must not inherit HTTP_PROXY.
         trust_env=proxy_url is not None,
     ) as client:
-        async with client.stream("GET", url, headers=UPSTREAM_HEADERS) as response:
+        async with client.stream(
+            "GET", url, headers=(device_settings or DeviceSettings()).headers()
+        ) as response:
             response.raise_for_status()
             body = bytearray()
             async for chunk in response.aiter_bytes():
@@ -220,12 +217,15 @@ async def prepare_subscription_sync(
     settings: Settings,
     secret_box: SecretBox,
     proxy_url: str | None = None,
+    device_settings: DeviceSettings | None = None,
 ) -> PreparedSubscriptionSync:
     url = secret_box.decrypt(subscription.url_ciphertext)
-    if proxy_url is None:
-        body, headers = await fetch_subscription(url, settings)
-    else:
-        body, headers = await fetch_subscription(url, settings, proxy_url)
+    effective_device = (
+        DeviceSettings.model_validate(subscription.device_settings)
+        if subscription.device_settings
+        else device_settings or DeviceSettings()
+    )
+    body, headers = await fetch_subscription(url, settings, proxy_url, effective_device)
     parsed_nodes = parse_subscription(body)
     if not parsed_nodes:
         raise ValueError("Upstream response does not contain supported nodes")
@@ -424,6 +424,7 @@ async def sync_subscription(
     settings: Settings,
     secret_box: SecretBox,
     proxy_url: str | None = None,
+    device_settings: DeviceSettings | None = None,
 ) -> int:
     subscription_id = subscription.id
     expected_version = subscription.updated_at
@@ -433,6 +434,7 @@ async def sync_subscription(
             settings,
             secret_box,
             proxy_url,
+            device_settings,
         )
         persisted_ids = await persist_subscription_syncs(
             session, [prepared], {}, secret_box, {subscription_id: expected_version}
