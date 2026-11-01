@@ -971,6 +971,48 @@ def test_default_profile_and_empty_upstream_error(tmp_path, monkeypatch):
     asyncio.run(with_client(app, scenario))
 
 
+def test_malformed_source_keeps_last_good_nodes(tmp_path, monkeypatch):
+    app = create_app(settings_for(tmp_path))
+    valid_uri = b"vless://one@one.example:443#One"
+    body = valid_uri + b"\nvless://id@[broken:443\nvmess://W10=\n"
+
+    async def fake_fetch(url, settings):
+        return body, httpx.Headers({"subscription-userinfo": "download=12"})
+
+    monkeypatch.setattr(
+        "backend.app.services.subscriptions.fetch_subscription", fake_fetch
+    )
+
+    async def scenario(client: httpx.AsyncClient):
+        nonlocal body
+        csrf = await login(client)
+        source_id = (await client.get("/api/subscriptions")).json()[0]["id"]
+        sync_url = f"/api/subscriptions/{source_id}/sync"
+        headers = {"X-CSRF-Token": csrf}
+
+        synced = await client.post(sync_url, headers=headers)
+        assert synced.status_code == 200
+        assert synced.json()["node_count"] == 1
+
+        body = b"vless://id@[broken:443\nvmess://W10=\n"
+        failed = await client.post(sync_url, headers=headers)
+        assert failed.status_code == 502
+        assert "supported nodes" in failed.json()["detail"]
+
+        source = (await client.get("/api/subscriptions")).json()[0]
+        assert source["status"] == "error"
+        assert source["node_count"] == 1
+        assert source["traffic"]["download"] == 12
+
+        # Automatic refresh must also tolerate a fully broken response and
+        # continue serving the previously imported nodes.
+        public = await client.get("/s/test-relay-token-at-least-16")
+        assert public.status_code == 200
+        assert base64.b64decode(public.content).splitlines() == [valid_uri]
+
+    asyncio.run(with_client(app, scenario))
+
+
 def test_removed_legacy_route_and_missing_dashboard_assets(tmp_path):
     app = create_app(settings_for(tmp_path))
     route_paths = {route.path for route in app.routes if hasattr(route, "path")}

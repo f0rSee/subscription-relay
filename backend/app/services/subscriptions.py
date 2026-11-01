@@ -100,14 +100,15 @@ def _node_metadata(uri: str) -> tuple[str, str, str | None]:
     host = parsed.hostname
 
     if protocol == "vmess":
-        try:
-            payload = uri.split("://", 1)[1]
-            decoded = _decode_base64_text(payload)
-            data = json.loads(decoded or "{}")
-            name = str(data.get("ps") or name).strip()
-            host = str(data.get("add") or "").strip() or host
-        except (ValueError, TypeError, json.JSONDecodeError):
-            pass
+        payload = uri.split("://", 1)[1].split("#", 1)[0]
+        decoded = _decode_base64_text(payload)
+        if decoded is None:
+            raise ValueError("Invalid VMess payload")
+        data = json.loads(decoded)
+        if not isinstance(data, dict):
+            raise ValueError("VMess payload must be a JSON object")
+        name = str(data.get("ps") or name).strip()
+        host = str(data.get("add") or "").strip() or host
 
     if not name:
         name = f"{protocol.upper()} · {host or 'server'}"
@@ -130,7 +131,11 @@ def parse_subscription(body: bytes) -> list[ParsedNode]:
             continue
         normalized = uri.split("#", 1)[0]
         fingerprint = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-        name, protocol, host = _node_metadata(uri)
+        try:
+            name, protocol, host = _node_metadata(uri)
+        except ValueError:
+            # A broken node must not prevent importing the rest of the source.
+            continue
         nodes.append(
             ParsedNode(
                 uri=uri,
@@ -150,6 +155,10 @@ def _parse_traffic_value(value: str) -> int | None:
     except InvalidOperation:
         return None
     if not parsed.is_finite() or parsed < 0:
+        return None
+    # Bound the Decimal before converting: a tiny header can encode an integer
+    # with billions of digits using scientific notation.
+    if parsed >= MAX_TRAFFIC_VALUE + 1:
         return None
     result = int(parsed)
     return result if result <= MAX_TRAFFIC_VALUE else None
