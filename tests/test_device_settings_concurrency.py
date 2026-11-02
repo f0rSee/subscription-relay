@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 from sqlalchemy.sql.dml import Update
@@ -13,6 +13,7 @@ from test_app import login, settings_for, with_client
 
 from backend.app.device_settings import DeviceSettings
 from backend.app.main import create_app
+from backend.app.models import Profile
 from backend.app.services.bootstrap import bootstrap
 
 POSTGRES_URL = os.environ.get("TEST_POSTGRES_URL")
@@ -123,6 +124,11 @@ def test_defaults_save_serializes_inheritance_changes(
             assert assigned.status_code == 200
         elif source_change == "bootstrap":
             assert (await client.delete(source_url, headers=headers)).status_code == 204
+            # Bootstrap imports UPSTREAM_URL only when creating the default profile.
+            async with runtime.database.sessions() as session:
+                profile = await session.scalar(select(Profile))
+                await session.delete(profile)
+                await session.commit()
         source_change_started.clear()
         pause_defaults_save = True
         saving = asyncio.create_task(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, Response
@@ -10,6 +11,10 @@ from .api.router import router as api_router
 from .config import Settings, get_settings
 from .runtime import create_runtime
 from .services.bootstrap import bootstrap
+from .services.expiration import (
+    cleanup_expired_subscriptions,
+    subscription_cleanup_loop,
+)
 
 
 def create_app(settings_override: Settings | None = None) -> FastAPI:
@@ -21,9 +26,14 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     async def lifespan(_: FastAPI):
         await runtime.database.create_schema()
         await bootstrap(runtime)
+        await cleanup_expired_subscriptions(runtime.database)
+        cleanup_task = asyncio.create_task(subscription_cleanup_loop(runtime.database))
         try:
             yield
         finally:
+            cleanup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await cleanup_task
             await runtime.database.close()
 
     app = FastAPI(
