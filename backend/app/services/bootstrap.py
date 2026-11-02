@@ -24,7 +24,8 @@ async def bootstrap(runtime: AppRuntime) -> None:
         subscription_count = await session.scalar(
             select(func.count()).select_from(Subscription)
         )
-        if not subscription_count and runtime.settings.upstream_url:
+        # Seed only on initial setup, so a deleted source stays deleted on restart.
+        if profile_created and not subscription_count and runtime.settings.upstream_url:
             subscription = Subscription(
                 name="Primary subscription",
                 url_ciphertext=runtime.secret_box.encrypt(
