@@ -1,5 +1,5 @@
 import { useMemo, useState, type FormEvent } from "react"
-import type { Subscription, SubscriptionInput, UpstreamProxy } from "@/api/types"
+import type { DeviceSettings, Subscription, SubscriptionInput, UpstreamProxy } from "@/api/types"
 import { Alert, AlertDescription, AlertTitle } from "@/components/reui/alert"
 import { Badge, type BadgeProps } from "@/components/reui/badge"
 import {
@@ -39,6 +39,7 @@ import {
   SelectTrigger,
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
+import { SubscriptionDeviceDialog } from "@/components/device-settings"
 import { TrafficUsageView } from "@/components/traffic-usage"
 import { cn } from "@/lib/utils"
 import { flexRender, useTable } from "@tanstack/react-table"
@@ -46,12 +47,16 @@ import type { ColumnDef, PaginationState, SortingState } from "@tanstack/react-t
 import {
   PlusIcon,
   RefreshCwIcon,
+  SmartphoneIcon,
   Trash2Icon,
   TriangleAlertIcon,
 } from "lucide-react"
 
 interface SubscriptionsViewProps {
   subscriptions: Subscription[]
+  defaultDeviceSettings: DeviceSettings | null
+  settingsError: string
+  onSaveDevice: (subscription: Subscription, value: DeviceSettings | null) => Promise<void>
   proxies: UpstreamProxy[]
   proxiesError: string
   loading: boolean
@@ -190,7 +195,7 @@ function AddSubscriptionDialog({
 }
 
 export function SubscriptionsView(props: SubscriptionsViewProps) {
-  const { subscriptions, proxies, proxiesError, loading, error, onRetry, onCreate, onToggle, onAssignProxy, onSync, onDelete } = props
+  const { subscriptions, proxies, proxiesError, loading, error, onRetry, onCreate, onToggle, onAssignProxy, onSync, onDelete, defaultDeviceSettings, settingsError, onSaveDevice } = props
   const [pagination, setPagination] = useState<PaginationState>({
     pageIndex: 0,
     pageSize: 10,
@@ -198,6 +203,7 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
   const [sorting, setSorting] = useState<SortingState>([])
   const [pendingId, setPendingId] = useState("")
   const [actionError, setActionError] = useState("")
+  const [deviceSubscription, setDeviceSubscription] = useState<Subscription | null>(null)
 
   async function run(id: string, action: () => Promise<void>) {
     setPendingId(id)
@@ -222,6 +228,18 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
             <p className="truncate text-xs text-muted-foreground" title={row.original.url_hint}>
               {row.original.url_hint}
             </p>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-auto max-w-full justify-start px-0 py-1 text-xs text-muted-foreground"
+              disabled={pendingId === row.original.id || !defaultDeviceSettings}
+              onClick={() => setDeviceSubscription(row.original)}
+            >
+              <SmartphoneIcon aria-hidden="true" className="size-3 shrink-0" />
+              <span className="truncate">{row.original.device_settings?.model ?? "Устройство по умолчанию"}</span>
+              <span className="sr-only"> для {row.original.name}</span>
+            </Button>
           </div>
         ),
         meta: { headerClassName: "w-[16%]" },
@@ -358,7 +376,7 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
         meta: { headerClassName: "w-[9%]" },
       },
     ],
-    [onAssignProxy, onDelete, onSync, onToggle, pendingId, proxies, proxiesError],
+    [onAssignProxy, onDelete, onSync, onToggle, pendingId, proxies, proxiesError, defaultDeviceSettings],
   )
 
   const table = useTable({
@@ -393,6 +411,14 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
             <AlertTitle>Ошибка источника</AlertTitle>
             <AlertDescription>{actionError || error}</AlertDescription>
             {error && <Button type="button" size="sm" variant="outline" onClick={onRetry}>Повторить</Button>}
+          </Alert>
+        )}
+        {settingsError && (
+          <Alert variant="destructive" className="mb-2">
+            <TriangleAlertIcon aria-hidden="true" />
+            <AlertTitle>Параметры устройства недоступны</AlertTitle>
+            <AlertDescription>{settingsError}</AlertDescription>
+            <Button type="button" size="sm" variant="outline" onClick={onRetry}>Повторить</Button>
           </Alert>
         )}
         {proxiesError && (
@@ -487,6 +513,14 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
           </div>
         </DataGrid>
       </FramePanel>
+      {deviceSubscription && (
+        <SubscriptionDeviceDialog
+          subscription={deviceSubscription}
+          defaults={defaultDeviceSettings}
+          onClose={() => setDeviceSubscription(null)}
+          onSave={(value) => onSaveDevice(deviceSubscription, value)}
+        />
+      )}
     </Frame>
   )
 }

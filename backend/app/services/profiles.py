@@ -19,6 +19,7 @@ from ..models import (
 )
 from ..runtime import AppRuntime
 from .observability import record_subscription_request
+from .settings import get_default_device_settings
 from .subscriptions import (
     PreparedSubscriptionSync,
     encode_subscription,
@@ -118,6 +119,7 @@ async def refresh_profile_sources(
                     )
                 )
             ).all()
+            default_device_settings = await get_default_device_settings(session)
 
         subscriptions_to_refresh = [
             subscription
@@ -151,6 +153,7 @@ async def refresh_profile_sources(
                     runtime.settings,
                     runtime.secret_box,
                     proxy_urls.get(subscription.id),
+                    default_device_settings,
                 )
 
         results = await asyncio.gather(

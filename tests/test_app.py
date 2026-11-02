@@ -278,7 +278,7 @@ def test_auto_refresh_discards_obsolete_proxy_result(
     old_body = b"vless://old@server.example:443#Old\n"
     new_body = b"vless://new@server.example:443#New\n"
 
-    async def fake_fetch(url, settings, proxy_url=None):
+    async def fake_fetch(url, settings, proxy_url=None, device_settings=None):
         if proxy_url == "http://old-proxy.example:8080":
             started.set()
             await release.wait()
@@ -359,7 +359,7 @@ def test_manual_sync_reports_obsolete_proxy_result(tmp_path, monkeypatch):
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def fake_fetch(url, settings, proxy_url):
+    async def fake_fetch(url, settings, proxy_url, device_settings=None):
         assert proxy_url == "http://old-proxy.example:8080"
         started.set()
         await release.wait()
@@ -556,7 +556,7 @@ def test_combines_sources_and_persists_profile_order(tmp_path, monkeypatch):
         b"vless://one@one.example:443#One\ntrojan://two@two.example:443#Two\n"
     )
 
-    async def fake_fetch(url, settings):
+    async def fake_fetch(url, settings, proxy_url=None, device_settings=None):
         assert url == "https://provider.example/sub?id=secret"
         return upstream, httpx.Headers({"content-type": "text/plain"})
 
@@ -620,7 +620,7 @@ def test_profile_source_order_toggle_and_token_rotation(tmp_path, monkeypatch):
         ),
     }
 
-    async def fake_fetch(url, settings):
+    async def fake_fetch(url, settings, proxy_url=None, device_settings=None):
         return upstream_by_url[url], httpx.Headers({"content-type": "text/plain"})
 
     monkeypatch.setattr(
@@ -770,7 +770,7 @@ def test_aggregates_profile_traffic_from_enabled_sources(tmp_path, monkeypatch):
         ),
     }
 
-    async def fake_fetch(url, settings):
+    async def fake_fetch(url, settings, proxy_url=None, device_settings=None):
         body, userinfo = usage_by_url[url]
         return base64.b64encode(body), httpx.Headers(
             {
@@ -900,7 +900,7 @@ def test_refreshes_all_sources_concurrently_before_each_response(
     max_active_fetches = 0
     calls_by_url: dict[str, int] = {}
 
-    async def fake_fetch(url, settings):
+    async def fake_fetch(url, settings, proxy_url=None, device_settings=None):
         nonlocal active_fetches, max_active_fetches
         calls_by_url[url] = calls_by_url.get(url, 0) + 1
         version = calls_by_url[url]
@@ -946,7 +946,7 @@ def test_refreshes_all_sources_concurrently_before_each_response(
 def test_default_profile_and_empty_upstream_error(tmp_path, monkeypatch):
     app = create_app(settings_for(tmp_path))
 
-    async def fake_fetch(url, settings):
+    async def fake_fetch(url, settings, proxy_url=None, device_settings=None):
         return b"device is not supported", httpx.Headers()
 
     monkeypatch.setattr(
@@ -976,7 +976,7 @@ def test_malformed_source_keeps_last_good_nodes(tmp_path, monkeypatch):
     valid_uri = b"vless://one@one.example:443#One"
     body = valid_uri + b"\nvless://id@[broken:443\nvmess://W10=\n"
 
-    async def fake_fetch(url, settings):
+    async def fake_fetch(url, settings, proxy_url=None, device_settings=None):
         return body, httpx.Headers({"subscription-userinfo": "download=12"})
 
     monkeypatch.setattr(
@@ -1044,7 +1044,7 @@ def test_request_logs_devices_settings_and_deduplication(tmp_path, monkeypatch):
     )
     fetch_count = 0
 
-    async def fake_fetch(url, settings):
+    async def fake_fetch(url, settings, proxy_url=None, device_settings=None):
         nonlocal fetch_count
         fetch_count += 1
         return upstream, httpx.Headers({"content-type": "text/plain"})
@@ -1138,5 +1138,267 @@ def test_request_logs_devices_settings_and_deduplication(tmp_path, monkeypatch):
         devices_after_disable = (await client.get("/api/devices")).json()
         assert len(devices_after_disable) == 2
         assert sum(device["request_count"] for device in devices_after_disable) == 2
+
+    asyncio.run(with_client(app, scenario))
+
+
+def test_device_settings_headers_inheritance_and_persistence(tmp_path):
+    from backend.app.device_settings import DeviceSettings
+
+    requests = []
+    defaults = DeviceSettings().model_dump()
+    custom = {
+        "user_agent": "CustomClient/1.0",
+        "hwid": "custom-device-id",
+        "os": "Android",
+        "os_version": "16",
+        "model": "Pixel 10",
+    }
+    changed_defaults = {**custom, "hwid": "shared-device", "model": "Shared phone"}
+    latest_defaults = {**changed_defaults, "hwid": "new-shared-device"}
+
+    async def upstream(reader, writer):
+        request = (await reader.readuntil(b"\r\n\r\n")).decode("ascii")
+        lines = request.split("\r\n")
+        requests.append(dict(line.split(": ", 1) for line in lines[1:] if line))
+        body = b"vless://id@server.example:443#DeviceTest\n"
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Length: "
+            + str(len(body)).encode()
+            + b"\r\nConnection: close\r\n\r\n"
+            + body
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    def assert_headers(expected):
+        actual = {key.lower(): value for key, value in requests[-1].items()}
+        for key, value in DeviceSettings(**expected).headers().items():
+            assert actual[key.lower()] == value
+
+    async def scenario():
+        server = await asyncio.start_server(upstream, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        settings = replace(
+            settings_for(tmp_path),
+            upstream_url=f"http://127.0.0.1:{port}/sub",
+            allow_insecure_http=True,
+        )
+        app = create_app(settings)
+        source_id = None
+        extra_id = None
+
+        async def verify(client):
+            nonlocal source_id, extra_id
+            csrf = await login(client)
+            headers = {"X-CSRF-Token": csrf}
+            source = (await client.get("/api/subscriptions")).json()[0]
+            source_id = source["id"]
+            source_url = f"/api/subscriptions/{source_id}"
+            assert source["device_settings"] is None
+            assert (await client.get("/api/settings")).json()[
+                "default_device_settings"
+            ] == defaults
+            assert (
+                await client.post(f"{source_url}/sync", headers=headers)
+            ).status_code == 200
+            assert_headers(defaults)
+            updated = await client.patch(
+                "/api/settings",
+                headers=headers,
+                json={"default_device_settings": changed_defaults},
+            )
+            assert updated.status_code == 200
+            assert updated.json()["default_device_settings"] == changed_defaults
+            extra = await client.post(
+                "/api/subscriptions",
+                headers=headers,
+                json={
+                    "name": "Custom",
+                    "url": settings.upstream_url,
+                    "device_settings": custom,
+                },
+            )
+            assert extra.status_code == 201
+            extra_id = extra.json()["id"]
+            extra_url = f"/api/subscriptions/{extra_id}"
+            assert extra.json()["device_settings"] == custom
+            assert (
+                await client.post(f"{source_url}/sync", headers=headers)
+            ).status_code == 200
+            assert_headers(changed_defaults)
+            assert (
+                await client.post(f"{extra_url}/sync", headers=headers)
+            ).status_code == 200
+            assert_headers(custom)
+            renamed = await client.patch(
+                extra_url, headers=headers, json={"name": "Renamed"}
+            )
+            assert renamed.json()["device_settings"] == custom
+            changed = await client.patch(
+                "/api/settings",
+                headers=headers,
+                json={"default_device_settings": latest_defaults},
+            )
+            assert changed.status_code == 200
+            sources = (await client.get("/api/subscriptions")).json()
+            assert next(s for s in sources if s["id"] == source_id)["status"] == "never"
+            assert (
+                next(s for s in sources if s["id"] == extra_id)["status"] == "healthy"
+            )
+            profile = (await client.get("/api/profiles")).json()[0]
+            before = len(requests)
+            assert (await client.get(profile["url"])).status_code == 200
+            assert len(requests) == before + 2
+            assert {r["X-HWID"] for r in requests[-2:]} == {
+                custom["hwid"],
+                latest_defaults["hwid"],
+            }
+            reset = await client.patch(
+                extra_url, headers=headers, json={"device_settings": None}
+            )
+            assert reset.status_code == 200
+            assert reset.json()["device_settings"] is None
+            assert (
+                await client.post(f"{extra_url}/sync", headers=headers)
+            ).status_code == 200
+            assert_headers(latest_defaults)
+            restored = await client.patch(
+                extra_url, headers=headers, json={"device_settings": custom}
+            )
+            assert restored.status_code == 200
+
+        async def verify_restart(client):
+            csrf = await login(client)
+            assert (await client.get("/api/settings")).json()[
+                "default_device_settings"
+            ] == latest_defaults
+            sources = (await client.get("/api/subscriptions")).json()
+            assert (
+                next(s for s in sources if s["id"] == extra_id)["device_settings"]
+                == custom
+            )
+            deleted = await client.delete(
+                f"/api/subscriptions/{extra_id}", headers={"X-CSRF-Token": csrf}
+            )
+            assert deleted.status_code == 204
+            async with restarted.state.runtime.database.sessions() as session:
+                from backend.app.models import SubscriptionDeviceSettings
+
+                assert await session.get(SubscriptionDeviceSettings, extra_id) is None
+
+        try:
+            await with_client(app, verify)
+            restarted = create_app(settings)
+            await with_client(restarted, verify_restart)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(scenario())
+
+
+def test_device_settings_reject_invalid_headers(tmp_path):
+    app = create_app(settings_for(tmp_path))
+
+    async def scenario(client):
+        csrf = await login(client)
+        headers = {"X-CSRF-Token": csrf}
+        source = (await client.get("/api/subscriptions")).json()[0]
+        for value in [
+            "",
+            "bad\r\nInjected: yes",
+            "bad\n",
+            "привет",
+            " leading",
+            "trailing ",
+            "a" * 513,
+            None,
+        ]:
+            for field in ["user_agent", "hwid", "os", "os_version", "model"]:
+                device = {field: value}
+                default_update = await client.patch(
+                    "/api/settings",
+                    headers=headers,
+                    json={"default_device_settings": device},
+                )
+                assert default_update.status_code == 422
+                override_update = await client.patch(
+                    f"/api/subscriptions/{source['id']}",
+                    headers=headers,
+                    json={"device_settings": device},
+                )
+                assert override_update.status_code == 422
+        assert (
+            await client.patch("/api/settings", json={"default_device_settings": {}})
+        ).status_code == 403
+
+    asyncio.run(with_client(app, scenario))
+
+
+@pytest.mark.parametrize("change", ["defaults", "override", "reset"])
+@pytest.mark.parametrize("manual", [True, False])
+def test_device_changes_discard_inflight_results(tmp_path, monkeypatch, change, manual):
+    from backend.app.device_settings import DeviceSettings
+
+    app = create_app(settings_for(tmp_path))
+    started = asyncio.Event()
+    release = asyncio.Event()
+    old_body = b"vless://old@server.example:443#Old\n"
+    new_body = b"vless://new@server.example:443#New\n"
+    calls = 0
+
+    async def fake_fetch(url, settings, proxy_url=None, device_settings=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            await release.wait()
+            return old_body, httpx.Headers()
+        return new_body, httpx.Headers()
+
+    monkeypatch.setattr(
+        "backend.app.services.subscriptions.fetch_subscription", fake_fetch
+    )
+
+    async def scenario(client):
+        csrf = await login(client)
+        headers = {"X-CSRF-Token": csrf}
+        source = (await client.get("/api/subscriptions")).json()[0]
+        source_url = f"/api/subscriptions/{source['id']}"
+        custom = DeviceSettings(hwid="override").model_dump()
+        if change == "reset":
+            assert (
+                await client.patch(
+                    source_url, headers=headers, json={"device_settings": custom}
+                )
+            ).status_code == 200
+        profile = (await client.get("/api/profiles")).json()[0]
+        pending = asyncio.create_task(
+            client.post(f"{source_url}/sync", headers=headers)
+            if manual
+            else client.get(profile["url"])
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        try:
+            changed = await client.patch(
+                "/api/settings" if change == "defaults" else source_url,
+                headers=headers,
+                json={"default_device_settings": custom}
+                if change == "defaults"
+                else {"device_settings": None if change == "reset" else custom},
+            )
+            assert changed.status_code == 200
+        finally:
+            release.set()
+        response = await pending
+        assert response.status_code == (409 if manual else 502)
+        source = (await client.get("/api/subscriptions")).json()[0]
+        assert source["status"] == "never"
+        assert source["node_count"] == 0
+        refreshed = await client.get(profile["url"])
+        assert refreshed.status_code == 200
+        assert base64.b64decode(refreshed.content) == new_body
 
     asyncio.run(with_client(app, scenario))

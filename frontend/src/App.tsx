@@ -4,6 +4,7 @@ import type {
   AuthSession,
   ClientDevice,
   DashboardSummary,
+  DeviceSettings,
   Profile,
   ProfileInput,
   ProfileNode,
@@ -217,10 +218,11 @@ export default function App() {
           setCsrfToken(nextSession.csrf_token)
           void loadDashboard()
           void loadProxies()
+          void loadSettings()
         }
       })
       .catch((reason) => setInitialError(errorMessage(reason)))
-  }, [loadDashboard, loadProxies])
+  }, [loadDashboard, loadProxies, loadSettings])
 
   useEffect(() => {
     if (!session?.authenticated || !selectedProfileId) {
@@ -240,7 +242,7 @@ export default function App() {
     if (!nextSession.authenticated) throw new Error("Сервер не создал сессию")
     setCsrfToken(nextSession.csrf_token)
     setSession(nextSession)
-    await Promise.all([loadDashboard(), loadProxies()])
+    await Promise.all([loadDashboard(), loadProxies(), loadSettings()])
   }
 
   async function logout() {
@@ -273,6 +275,12 @@ export default function App() {
   async function assignSubscriptionProxy(subscription: Subscription, proxyId: string | null) {
     await api.updateSubscription(subscription.id, { proxy_id: proxyId })
     toast.success(proxyId ? "Прокси назначен" : "Источник обновляется напрямую")
+    await loadDashboard()
+  }
+
+  async function saveSubscriptionDevice(subscription: Subscription, value: DeviceSettings | null) {
+    await api.updateSubscription(subscription.id, { device_settings: value })
+    toast.success(value ? "Устройство сохранено" : "Используются общие параметры устройства")
     await loadDashboard()
   }
 
@@ -344,6 +352,7 @@ export default function App() {
   async function updateRelaySettings(input: RelaySettingsInput) {
     const nextSettings = await api.updateSettings(input)
     setRelaySettings(nextSettings)
+    if (input.default_device_settings) await loadDashboard()
     toast.success("Настройка сохранена")
   }
 
@@ -438,11 +447,14 @@ export default function App() {
             {activeView === "subscriptions" && (
               <SubscriptionsView
                 subscriptions={subscriptions}
+                defaultDeviceSettings={relaySettings?.default_device_settings ?? null}
+                settingsError={settingsError}
+                onSaveDevice={saveSubscriptionDevice}
                 proxies={proxies}
                 proxiesError={proxiesError}
                 loading={loadingDashboard}
                 error={subscriptionsError}
-                onRetry={() => void loadDashboard()}
+                onRetry={() => { void loadDashboard(); void loadSettings() }}
                 onCreate={createSubscription}
                 onToggle={toggleSubscription}
                 onAssignProxy={assignSubscriptionProxy}
@@ -468,7 +480,7 @@ export default function App() {
                 subscriptions={subscriptions}
                 loading={loadingDashboard}
                 error={subscriptionsError}
-                onRetry={() => void loadDashboard()}
+                onRetry={() => { void loadDashboard(); void loadSettings() }}
                 onCreate={createProfile}
                 onUpdate={updateProfile}
                 onDelete={deleteProfile}

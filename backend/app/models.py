@@ -55,6 +55,32 @@ class Subscription(Base):
         back_populates="subscription", cascade="all, delete-orphan", uselist=False
     )
 
+    device_settings: Mapped[SubscriptionDeviceSettings | None] = relationship(
+        cascade="all, delete-orphan", uselist=False, lazy="selectin"
+    )
+
+
+class DeviceSettingsColumns:
+    user_agent: Mapped[str] = mapped_column(String(512))
+    hwid: Mapped[str] = mapped_column(String(512))
+    os: Mapped[str] = mapped_column(String(512))
+    os_version: Mapped[str] = mapped_column(String(512))
+    model: Mapped[str] = mapped_column(String(512))
+
+
+class DefaultDeviceSettings(DeviceSettingsColumns, Base):
+    __tablename__ = "default_device_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+
+
+class SubscriptionDeviceSettings(DeviceSettingsColumns, Base):
+    __tablename__ = "subscription_device_settings"
+
+    subscription_id: Mapped[str] = mapped_column(
+        ForeignKey("subscriptions.id", ondelete="CASCADE"), primary_key=True
+    )
+
 
 class UpstreamProxy(Base):
     __tablename__ = "upstream_proxies"

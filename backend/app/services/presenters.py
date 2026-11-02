@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
+from ..device_settings import DeviceSettings
 from ..models import Subscription, SubscriptionUsage
 from ..schemas import (
     ProfileTrafficResponse,
@@ -38,6 +39,11 @@ def subscription_response(
         name=subscription.name,
         url_hint=url_hint,
         proxy_id=proxy_id,
+        device_settings=(
+            DeviceSettings.model_validate(subscription.device_settings)
+            if subscription.device_settings
+            else None
+        ),
         enabled=subscription.enabled,
         priority=subscription.priority,
         status=subscription.status,
