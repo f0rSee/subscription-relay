@@ -2,14 +2,15 @@ from __future__ import annotations
 
 from sqlalchemy import func, select
 
-from ..models import Profile, ProfileSubscription, RelaySettings, Subscription
+from ..models import Profile, ProfileSubscription, Subscription
 from ..runtime import AppRuntime
+from .settings import get_relay_settings, lock_device_settings_changes
 
 
 async def bootstrap(runtime: AppRuntime) -> None:
     async with runtime.database.sessions() as session:
-        if await session.get(RelaySettings, 1) is None:
-            session.add(RelaySettings(id=1))
+        await get_relay_settings(session)
+        await lock_device_settings_changes(session)
 
         profile = await session.scalar(
             select(Profile).where(Profile.token == runtime.settings.relay_token)

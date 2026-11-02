@@ -24,7 +24,10 @@ from ..schemas import (
     SyncResponse,
 )
 from ..services.presenters import subscription_response
-from ..services.settings import get_default_device_settings
+from ..services.settings import (
+    get_default_device_settings,
+    lock_device_settings_changes,
+)
 from ..services.subscriptions import (
     StaleSubscriptionSync,
     proxy_urls_for_subscriptions,
@@ -77,6 +80,7 @@ async def create_subscription(
     settings: SettingsDep,
     secret_box: SecretBoxDep,
 ) -> SubscriptionResponse:
+    await lock_device_settings_changes(session)
     _validate_source_url(
         payload.url,
         allow_insecure_http=settings.allow_insecure_http,
@@ -134,6 +138,8 @@ async def update_subscription(
     settings: SettingsDep,
     secret_box: SecretBoxDep,
 ) -> SubscriptionResponse:
+    if "device_settings" in payload.model_fields_set:
+        await lock_device_settings_changes(session)
     subscription = await session.get(Subscription, subscription_id)
     if subscription is None:
         raise HTTPException(status_code=404, detail="Subscription not found")

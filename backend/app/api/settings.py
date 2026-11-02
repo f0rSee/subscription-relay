@@ -11,6 +11,7 @@ from ..schemas import RelaySettingsResponse, RelaySettingsUpdate
 from ..services.settings import (
     get_default_device_settings,
     get_relay_settings,
+    lock_device_settings_changes,
     relay_settings_response,
 )
 
@@ -29,6 +30,8 @@ async def update_settings(
     payload: RelaySettingsUpdate,
     session: SessionDep,
 ) -> RelaySettingsResponse:
+    if payload.default_device_settings is not None:
+        await lock_device_settings_changes(session)
     settings = await get_relay_settings(session)
     if payload.default_device_settings is not None:
         current = await get_default_device_settings(session)

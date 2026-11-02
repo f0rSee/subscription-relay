@@ -47,6 +47,7 @@ import type { ColumnDef, PaginationState, SortingState } from "@tanstack/react-t
 import {
   PlusIcon,
   RefreshCwIcon,
+  SmartphoneIcon,
   Trash2Icon,
   TriangleAlertIcon,
 } from "lucide-react"
@@ -202,6 +203,7 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
   const [sorting, setSorting] = useState<SortingState>([])
   const [pendingId, setPendingId] = useState("")
   const [actionError, setActionError] = useState("")
+  const [deviceSubscription, setDeviceSubscription] = useState<Subscription | null>(null)
 
   async function run(id: string, action: () => Promise<void>) {
     setPendingId(id)
@@ -226,12 +228,18 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
             <p className="truncate text-xs text-muted-foreground" title={row.original.url_hint}>
               {row.original.url_hint}
             </p>
-            <SubscriptionDeviceDialog
-              subscription={row.original}
-              defaults={defaultDeviceSettings}
-              disabled={pendingId === row.original.id}
-              onSave={(value) => onSaveDevice(row.original, value)}
-            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-auto max-w-full justify-start px-0 py-1 text-xs text-muted-foreground"
+              disabled={pendingId === row.original.id || !defaultDeviceSettings}
+              onClick={() => setDeviceSubscription(row.original)}
+            >
+              <SmartphoneIcon aria-hidden="true" className="size-3 shrink-0" />
+              <span className="truncate">{row.original.device_settings?.model ?? "Устройство по умолчанию"}</span>
+              <span className="sr-only"> для {row.original.name}</span>
+            </Button>
           </div>
         ),
         meta: { headerClassName: "w-[16%]" },
@@ -368,7 +376,7 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
         meta: { headerClassName: "w-[9%]" },
       },
     ],
-    [onAssignProxy, onDelete, onSync, onToggle, pendingId, proxies, proxiesError, defaultDeviceSettings, onSaveDevice],
+    [onAssignProxy, onDelete, onSync, onToggle, pendingId, proxies, proxiesError, defaultDeviceSettings],
   )
 
   const table = useTable({
@@ -505,6 +513,14 @@ export function SubscriptionsView(props: SubscriptionsViewProps) {
           </div>
         </DataGrid>
       </FramePanel>
+      {deviceSubscription && (
+        <SubscriptionDeviceDialog
+          subscription={deviceSubscription}
+          defaults={defaultDeviceSettings}
+          onClose={() => setDeviceSubscription(null)}
+          onSave={(value) => onSaveDevice(deviceSubscription, value)}
+        />
+      )}
     </Frame>
   )
 }

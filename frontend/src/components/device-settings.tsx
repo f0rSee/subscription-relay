@@ -8,12 +8,10 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
-import { SmartphoneIcon } from "lucide-react"
 
 const fields: { key: keyof DeviceSettings; label: string }[] = [
   { key: "user_agent", label: "User-Agent" },
@@ -50,13 +48,12 @@ export function DeviceSettingsFields({ value, onChange, disabled = false }: {
   )
 }
 
-export function SubscriptionDeviceDialog({ subscription, defaults, disabled, onSave }: {
+export function SubscriptionDeviceDialog({ subscription, defaults, onClose, onSave }: {
   subscription: Subscription
   defaults: DeviceSettings | null
-  disabled: boolean
+  onClose: () => void
   onSave: (value: DeviceSettings | null) => Promise<void>
 }) {
-  const [open, setOpen] = useState(false)
   const [inherit, setInherit] = useState(!subscription.device_settings)
   const [value, setValue] = useState(subscription.device_settings ?? defaults)
   const [saving, setSaving] = useState(false)
@@ -69,7 +66,7 @@ export function SubscriptionDeviceDialog({ subscription, defaults, disabled, onS
     setError("")
     try {
       await onSave(inherit ? null : value)
-      setOpen(false)
+      onClose()
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось сохранить устройство")
     } finally {
@@ -79,30 +76,11 @@ export function SubscriptionDeviceDialog({ subscription, defaults, disabled, onS
 
   return (
     <Dialog
-      open={open}
+      open
       onOpenChange={(next) => {
-        if (saving) return
-        if (next) {
-          setInherit(!subscription.device_settings)
-          setValue(subscription.device_settings ?? defaults)
-          setError("")
-        }
-        setOpen(next)
+        if (!next && !saving) onClose()
       }}
     >
-      <DialogTrigger render={
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="h-auto max-w-full justify-start px-0 py-1 text-xs text-muted-foreground"
-          disabled={disabled || !defaults}
-        />
-      }>
-        <SmartphoneIcon aria-hidden="true" className="size-3 shrink-0" />
-        <span className="truncate">{subscription.device_settings?.model ?? "Устройство по умолчанию"}</span>
-        <span className="sr-only"> для {subscription.name}</span>
-      </DialogTrigger>
       <DialogContent className="max-h-[90svh] overflow-y-auto">
         <form onSubmit={submit}>
           <DialogHeader>
