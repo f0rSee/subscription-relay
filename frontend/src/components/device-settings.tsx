@@ -1,5 +1,7 @@
 import { useId, useState, type FormEvent } from "react"
+import { ShuffleIcon } from "lucide-react"
 import type { DeviceSettings, Subscription } from "@/api/types"
+import { generateDeviceSettings } from "@/lib/device-settings"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -28,22 +30,38 @@ export function DeviceSettingsFields({ value, onChange, disabled = false }: {
 }) {
   const id = useId()
   return (
-    <div className="grid gap-4 sm:grid-cols-2">
-      {fields.map(({ key, label }) => (
-        <div key={key} className={key === "user_agent" ? "space-y-1.5 sm:col-span-2" : "space-y-1.5"}>
-          <Label htmlFor={`${id}-${key}`}>{label}</Label>
-          <Input
-            id={`${id}-${key}`}
-            value={value[key]}
-            onChange={(event) => onChange({ ...value, [key]: event.target.value })}
-            required
-            maxLength={512}
-            pattern="[!-~]([ -~]*[!-~])?"
-            title="Печатные латинские символы без пробелов в начале и конце"
-            disabled={disabled}
-          />
-        </div>
-      ))}
+    <div className="space-y-4">
+      <div className="space-y-1.5">
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => onChange(generateDeviceSettings())}
+          disabled={disabled}
+        >
+          <ShuffleIcon aria-hidden="true" />
+          Сгенерировать
+        </Button>
+        <p className="text-xs text-muted-foreground">
+          Случайное устройство и новый HWID. Значения применятся после сохранения.
+        </p>
+      </div>
+      <div className="grid gap-4 sm:grid-cols-2">
+        {fields.map(({ key, label }) => (
+          <div key={key} className={key === "user_agent" ? "space-y-1.5 sm:col-span-2" : "space-y-1.5"}>
+            <Label htmlFor={`${id}-${key}`}>{label}</Label>
+            <Input
+              id={`${id}-${key}`}
+              value={value[key]}
+              onChange={(event) => onChange({ ...value, [key]: event.target.value })}
+              required
+              maxLength={512}
+              pattern="[!-~]([ -~]*[!-~])?"
+              title="Печатные латинские символы без пробелов в начале и конце"
+              disabled={disabled}
+            />
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
